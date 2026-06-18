@@ -1,6 +1,13 @@
+@font-face {
+  font-family: "Envy Code B";
+  src: url("./Envy Code B 10pt.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+}
+
 * {
   box-sizing: border-box;
-  font-family: system-ui, sans-serif, monospace;
+  font-family: "Envy Code B", monospace;
 }
 
 body {
