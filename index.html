@@ -1,26 +1,91 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>gen_size JS</title>
+  <title>Token Exploiter</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main>
-    <h1>gen_size(size)</h1>
+  <main class="app">
+    <header class="header">
+      <h1>Token Exploiter for Replicube</h1>
+      <p class="subtitle">
+        Search for an expression that satisfies the entered color.
+      </p>
+    </header>
 
-    <div class="form-row">
-      <label for="sizeInput">size:</label>
-      <input id="sizeInput" type="number" step="1" value="1">
-      <button id="runButton">実行</button>
-    </div>
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Input pairs</h2>
+        <button id="addRowButton" type="button">Add row</button>
+      </div>
 
-    <p id="status"></p>
+      <div class="table-wrap">
+        <table id="pairsTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>input</th>
+              <th>color</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="pairsBody"></tbody>
+        </table>
+      </div>
 
-    <h2>ランダム表示 10 個</h2>
-    <pre id="output"></pre>
+      <div class="controls">
+        <label class="field">
+          <span>Max token</span>
+          <input id="maxTokenInput" type="number" min="3" step="1" value="8">
+        </label>
+
+        <button id="runButton" type="button" class="primary">Run scan</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Result</h2>
+      <pre id="resultOutput">Ready.</pre>
+    </section>
+
+    <section class="panel notes">
+      <h2>Notes</h2>
+      <p>
+        Color values must contain integers from 0 to 16.
+      </p>
+      <p>
+        Duplicate x_in values are rejected.
+      </p>
+      <p>
+        As a rough guideline, inputs with length 7 or less may finish within five minutes.
+        Longer inputs are usually not practical.
+      </p>
+      <p>
+        The input does not need to be in ascending order. It will be sorted automatically.
+      <p/>
+      <p>
+        Please note that errors may occur in the output results.
+      </p>
+    </section>
+
+    <section class="panel notes">
+      <h2>More Details</h2>
+      <p>
+        There is a rule of thumb known as the "n+1 rule" regarding the number of inputs and tokens.
+        For instance, if you assign random colors to an input of length 5, such as "input = [-2, -1, 0, 1, 2]",
+        the most frequently detected pattern will be a 6-token expression.
+      </p>
+      <p>
+        Currently, the only expressions being scanned are "a^x", "a^x/b", "b/a^x", and "a^x*b".
+        Therefore, inputs containing spaces, such as input = [-2,-1, 0, 1, 2], color = [2, 5, 1, 0, 3], are not found.
+      </p>
+    </section>
+
   </main>
 
-  <script src="script.js"></script>
+  <script src="gen_size.js"></script>
+  <script src="float_format.js"></script>
+  <script src="scan.js"></script>
 </body>
 </html>
