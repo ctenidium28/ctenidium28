@@ -111,6 +111,21 @@ class ScanStop extends Error {
   }
 }
 
+class ScanCancelled extends Error {
+  constructor() {
+    super("Scan stopped.");
+    this.name = "ScanCancelled";
+  }
+}
+
+let currentScanState = null;
+
+function checkCancelled(cancelState) {
+  if (cancelState && cancelState.cancelled) {
+    throw new ScanCancelled();
+  }
+}
+
 function drop(exp) {
   throw new ScanStop(exp);
 }
@@ -119,7 +134,7 @@ function drop(exp) {
 // Core scan
 // ------------------------------------------------------------
 
-async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress) {
+async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelState) {
   let xIn = rawXIn.slice();
   let xOut = rawXOut.slice();
 
@@ -206,24 +221,33 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress) {
   }
 
   async function maybeYield(token, sym) {
+    checkCancelled(cancelState);
+
     workCounter++;
 
     if ((workCounter & 4095) === 0) {
       if (onProgress) {
         onProgress(`Scanning... token=${token}, symbol="${sym || "x"}", checks=${workCounter}`);
       }
+
       await sleep0();
+      checkCancelled(cancelState);
     }
   }
 
   for (let token = 3; token <= maxToken; token++) {
+    checkCancelled(cancelState);
+
     if (onProgress) {
       onProgress(`Scanning... token=${token}`);
     }
 
     await sleep0();
+    checkCancelled(cancelState);
 
     for (let si = 0; si < sList.length; si++) {
+      checkCancelled(cancelState);
+
       const sym = sStr[si];
       const sx = sList[si];
 
@@ -275,7 +299,7 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress) {
 
         for (const a of A) {
           if (scan(sx, x => spow(a, x))) {
-            drop(`${repFormat(a)}^${sym}x`);
+            drop(`${repFormat(tokenRange, a)}^${sym}x`);
           }
 
           await maybeYield(token, sym);
@@ -311,7 +335,7 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress) {
           for (const a of A) {
             for (const b of B1) {
               if (scan(sx, x => sdiv(spow(a, x), b))) {
-                drop(`${repFormat(a)}^${sym}x/${repFormat(b)}`);
+                drop(`${repFormat(t, a)}^${sym}x/${repFormat(tokenRange - t, b)}`);
               }
 
               await maybeYield(token, sym);
@@ -319,11 +343,11 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress) {
 
             for (const b of B2) {
               if (scan(sx, x => sdiv(b, spow(a, x)))) {
-                drop(`${repFormat(b)}/${repFormat(a)}^${sym}x`);
+                drop(`${repFormat(tokenRange - t, b)}/${repFormat(t, a)}^${sym}x`);
               }
 
               if (scan(sx, x => smul(spow(a, x), b))) {
-                drop(`${repFormat(a)}^${sym}x*${repFormat(b)}`);
+                drop(`${repFormat(t, a)}^${sym}x*${repFormat(tokenRange - t, b)}`);
               }
 
               await maybeYield(token, sym);
@@ -344,6 +368,7 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress) {
 const pairsBody = document.getElementById("pairsBody");
 const addRowButton = document.getElementById("addRowButton");
 const runButton = document.getElementById("runButton");
+const stopButton = document.getElementById("stopButton");
 const maxTokenInput = document.getElementById("maxTokenInput");
 const resultOutput = document.getElementById("resultOutput");
 
@@ -436,8 +461,14 @@ addRowButton.addEventListener("click", () => {
 
 runButton.addEventListener("click", async () => {
   resultOutput.textContent = "Scanning...";
+
+  const cancelState = { cancelled: false };
+  currentScanState = cancelState;
+
   runButton.disabled = true;
+  stopButton.disabled = false;
   addRowButton.disabled = true;
+  maxTokenInput.disabled = true;
 
   try {
     const { xIn, xOut } = readPairs();
@@ -449,16 +480,33 @@ runButton.addEventListener("click", async () => {
 
     await runExpressionScan(xIn, xOut, maxToken, message => {
       resultOutput.textContent = message;
-    });
+    }, cancelState);
+
   } catch (e) {
-    if (e instanceof ScanStop) {
+    if (e instanceof ScanCancelled) {
+      resultOutput.textContent = "Stopped.";
+    } else if (e instanceof ScanStop) {
       resultOutput.textContent = e.messageText;
     } else {
       resultOutput.textContent = String(e && e.stack ? e.stack : e);
     }
   } finally {
+    if (currentScanState === cancelState) {
+      currentScanState = null;
+    }
+
     runButton.disabled = false;
+    stopButton.disabled = true;
     addRowButton.disabled = false;
+    maxTokenInput.disabled = false;
+  }
+});
+
+stopButton.addEventListener("click", () => {
+  if (currentScanState) {
+    currentScanState.cancelled = true;
+    resultOutput.textContent = "Stopping...";
+    stopButton.disabled = true;
   }
 });
 
