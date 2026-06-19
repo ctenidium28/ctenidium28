@@ -182,3 +182,35 @@ pre {
     width: auto;
   }
 }
+
+.button-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+button.stop {
+  background: #5f2120;
+  border-color: #8b3431;
+  color: #ffd7d7;
+}
+
+button.stop:hover:not(:disabled) {
+  background: #7a2b28;
+}
+
+button:disabled,
+button.primary:disabled,
+button.stop:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  background: #30363d;
+  border-color: #484f58;
+  color: #8b949e;
+}
+
+button:disabled:hover,
+button.primary:disabled:hover,
+button.stop:disabled:hover {
+  background: #30363d;
+}
