@@ -40,7 +40,10 @@
           <input id="maxTokenInput" type="number" min="3" step="1" value="8">
         </label>
 
-        <button id="runButton" type="button" class="primary">Run scan</button>
+        <div class="button-row">
+          <button id="runButton" type="button" class="primary">Run scan</button>
+          <button id="stopButton" type="button" class="stop" disabled>Stop</button>
+        </div>
       </div>
     </section>
 
@@ -67,6 +70,9 @@
       <p>
         Please note that errors may occur in the output results.
       </p>
+      <p>
+        Pressing the Stop button will cancel the scan. There is no resume function.
+      </p>
     </section>
 
     <section class="panel notes">
@@ -79,6 +85,10 @@
       <p>
         Currently, the only expressions being scanned are "a^x", "a^x/b", "b/a^x", and "a^x*b".
         Therefore, inputs containing spaces, such as input = [-2,-1, 0, 1, 2], color = [2, 5, 1, 0, 3], are not found.
+      </p>
+      <p>
+        Scans that do not include 0 in the input are expected to take a very long time.
+        Therefore, if you know the color for 0, I recommend including it in the input.
       </p>
     </section>
 
