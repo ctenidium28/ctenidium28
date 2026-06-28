@@ -1,48 +1,57 @@
 "use strict";
 
 // ------------------------------------------------------------
-// gen_size.py 相当の定数
+// Parameters
 // ------------------------------------------------------------
 
 const R_MAX = 17;
 
-const TEN_POW_BIG = Array.from(
-  { length: R_MAX },
-  (_, r) => 10n ** BigInt(r)
-);
-
-const HEX_POW_BIG = Array.from(
-  { length: R_MAX },
-  (_, r) => 16n ** BigInt(r)
-);
-
-// Python:
-// POW10_SHIFT = tuple(Decimal(10) ** r for r in range(1 - r_max, r_max))
-const POW10_SHIFT = [];
-for (let r = 1 - R_MAX; r < R_MAX; r++) {
-  POW10_SHIFT.push(r);
-}
-
-// Python:
-// POW2_SHIFT = tuple(Decimal(2) ** r for r in range(1 - r_max, 0))
-const POW2_SHIFT = [];
-for (let r = 1 - R_MAX; r < 0; r++) {
-  POW2_SHIFT.push(r);
-}
+// gen_size is specialized for scan.
+// It returns only positive shell candidates for sizes 1..4.
+const MAX_SCAN_SIZE = 4;
 
 
 // ------------------------------------------------------------
-// ユーティリティ
+// Precomputed constants
 // ------------------------------------------------------------
 
-function is2pow(n) {
-  if (!Number.isInteger(n) || n < 0) return false;
-  if (n === 0) return true;
+const DEC_SCALES = Array.from(
+  { length: R_MAX },
+  (_, r) => 10 ** (-r)
+);
 
-  while (n % 2 === 0) {
-    n /= 2;
-  }
-  return n === 1;
+const TEN_POW = Array.from(
+  { length: R_MAX },
+  (_, r) => 10 ** r
+);
+
+const HEX_SCALES = Array.from(
+  { length: R_MAX },
+  (_, r) => 16 ** (-r)
+);
+
+const HEX_POW = Array.from(
+  { length: R_MAX },
+  (_, r) => 16 ** r
+);
+
+const POW10_SHIFT = Array.from(
+  { length: 2 * R_MAX - 1 },
+  (_, i) => 10 ** (1 - R_MAX + i)
+);
+
+const POW2_SHIFT = Array.from(
+  { length: R_MAX - 1 },
+  (_, i) => 2 ** (1 - R_MAX + i)
+);
+
+
+// ------------------------------------------------------------
+// Basic size utilities
+// ------------------------------------------------------------
+
+function is_2pow(n) {
+  return n === 0 || (n > 0 && (n & (n - 1)) === 0);
 }
 
 function bitLength(n) {
@@ -51,296 +60,328 @@ function bitLength(n) {
 }
 
 function size2int(size) {
-  if (size <= 0) return 1;
+  return size > 0 ? (2 ** (4 * bitLength(size))) + 1 : 1;
+}
 
-  const exp = 4 * bitLength(size);
 
-  // JavaScript の Number で安全に整数として扱える範囲を超えると、
-  // range ループ自体が現実的でなくなるので明示的に止める。
-  if (exp > 52) {
-    throw new RangeError(
-      `size2int(${size}) = 2^${exp} + 1 は JavaScript の安全整数範囲を超えます`
-    );
+// ------------------------------------------------------------
+// Small cache helper
+// ------------------------------------------------------------
+
+function getCached(cache, key, build) {
+  if (cache.has(key)) {
+    return cache.get(key);
   }
 
-  return 2 ** exp + 1;
-}
-
-function minBigIntAsNumber(aNumber, bBigInt) {
-  const aBigInt = BigInt(aNumber);
-  const m = bBigInt < aBigInt ? bBigInt : aBigInt;
-
-  if (m > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new RangeError("ループ回数が JavaScript の安全整数範囲を超えました");
-  }
-
-  return Number(m);
+  const value = build();
+  cache.set(key, value);
+  return value;
 }
 
 
 // ------------------------------------------------------------
-// Decimal 風の 10 進値表現
-//
-// Python 版の gen_size_dec は Decimal を返す。
-// JavaScript には標準 Decimal がないため、
-// 内部では coeff * 10^exp という形で保持する。
-// 最終的に gen_size では Number に変換する。
+// Pair generation
 // ------------------------------------------------------------
 
-function normalizeDec(coeff, exp) {
-  if (coeff === 0n) return null;
-
-  while (coeff % 10n === 0n) {
-    coeff /= 10n;
-    exp += 1;
-  }
-
-  return {
-    coeff,
-    exp,
-    key: `${coeff.toString()}e${exp}`
-  };
-}
-
-function addDec(map, coeff, exp) {
-  const v = normalizeDec(coeff, exp);
-  if (v !== null && !map.has(v.key)) {
-    map.set(v.key, v);
-  }
-}
-
-function decToNumber(v) {
-  return Number(`${v.coeff.toString()}e${v.exp}`);
-}
-
-function decMulPow10ToNumber(v, shift) {
-  return Number(`${v.coeff.toString()}e${v.exp + shift}`);
-}
-
-
-// ------------------------------------------------------------
-// Python の lru_cache(maxsize=None) 相当
-// ------------------------------------------------------------
-
-const decPairsCache = new Map();
-const hexPairsCache = new Map();
-
-const genSizeDecCache = new Map();
-const genSizeHexCache = new Map();
-const genSizeCache = new Map();
-
-
-// ------------------------------------------------------------
-// _dec_pairs(size)
-// ------------------------------------------------------------
+const DEC_PAIRS_CACHE = new Map();
+const HEX_PAIRS_CACHE = new Map();
 
 function decPairs(size) {
-  if (decPairsCache.has(size)) {
-    return decPairsCache.get(size);
-  }
-
-  const out = [];
-
-  for (let a = 0; a <= size; a++) {
-    if (is2pow(a) && is2pow(size - a)) {
-      out.push([a, size - a]);
+  return getCached(DEC_PAIRS_CACHE, size, () => {
+    if (size < 0) {
+      return [];
     }
-  }
 
-  decPairsCache.set(size, out);
-  return out;
+    const out = [];
+
+    for (let a = 0; a <= size; a++) {
+      const b = size - a;
+
+      if (is_2pow(a) && is_2pow(b)) {
+        out.push([a, b]);
+      }
+    }
+
+    return out;
+  });
 }
-
-
-// ------------------------------------------------------------
-// _hex_pairs(size)
-// ------------------------------------------------------------
 
 function hexPairs(size) {
-  if (hexPairsCache.has(size)) {
-    return hexPairsCache.get(size);
-  }
-
-  const out = [];
-
-  for (let a = 1; a < size; a++) {
-    if (is2pow(a) && is2pow(size - a)) {
-      out.push([a, size - a]);
+  return getCached(HEX_PAIRS_CACHE, size, () => {
+    if (size < 0) {
+      return [];
     }
-  }
 
-  if (size >= 1 && is2pow(size - 1)) {
-    out.push([0, size - 1]);
-  }
+    const out = [];
 
-  hexPairsCache.set(size, out);
-  return out;
+    for (let a = 1; a < size; a++) {
+      const b = size - a;
+
+      if (is_2pow(a) && is_2pow(b)) {
+        out.push([a, b]);
+      }
+    }
+
+    if (size >= 1 && is_2pow(size - 1)) {
+      out.push([0, size - 1]);
+    }
+
+    return out;
+  });
 }
 
 
 // ------------------------------------------------------------
-// _gen_size_dec_cached(size)
-// Python 版では frozenset[Decimal]
-// JS 版では Array<{ coeff: BigInt, exp: number, key: string }>
+// Decimal positive candidates
+//
+// Python 版の _gen_size_dec_positive_cached(size) 相当。
+// Decimal は使わず、最終的に float 化される値を Number として直接作る。
 // ------------------------------------------------------------
 
-function genSizeDecCached(size) {
-  if (genSizeDecCache.has(size)) {
-    return genSizeDecCache.get(size);
-  }
+const GEN_SIZE_DEC_POSITIVE_CACHE = new Map();
 
-  const seen = new Map();
+function genSizeDecPositiveCached(size) {
+  return getCached(GEN_SIZE_DEC_POSITIVE_CACHE, size, () => {
+    if (size < 0) {
+      return new Set();
+    }
 
-  for (const [leftSize, rightSize] of decPairs(size)) {
-    const P = size2int(leftSize);
-    const Q = size2int(rightSize);
+    const out = new Set();
 
-    for (let r = 0; r < R_MAX; r++) {
-      const stepBig = TEN_POW_BIG[r];
+    for (const [leftSize, rightSize] of decPairs(size)) {
+      const P = size2int(leftSize);
+      const Q = size2int(rightSize);
 
-      for (let p = 0; p < P; p++) {
-        const qCount = minBigIntAsNumber(
-          Q,
-          BigInt(P - p) * stepBig
-        );
+      for (let r = 0; r < R_MAX; r++) {
+        const step = TEN_POW[r];
 
-        const base = BigInt(p) * stepBig;
+        for (let p = 0; p < P; p++) {
+          const qLim = Math.min(Q, (P - p) * step);
 
-        for (let q = 0; q < qCount; q++) {
-          const num = base + BigInt(q);
-
-          if (num !== 0n) {
-            addDec(seen, num, -r);
-            addDec(seen, -num, -r);
+          for (let q = 0; q < qLim; q++) {
+            if (p !== 0 || q !== 0) {
+              // Python:
+              //   Decimal(p * step + q) * Decimal(10) ** (-r)
+              //
+              // JS では p * step + q を先に作ると、
+              // 大きい step で q が潰れやすいので、
+              // p + q / step の形にする。
+              out.add(p + q / step);
+            }
           }
         }
       }
     }
-  }
 
-  const result = Array.from(seen.values());
-  genSizeDecCache.set(size, result);
-  return result;
+    return out;
+  });
 }
 
 
 // ------------------------------------------------------------
-// _gen_size_hex_cached(size)
-// Python 版では frozenset[Decimal]
-// JS 版では最終的な float 相当として Set<number>
+// Hex positive candidates
+//
+// Python 版の _gen_size_hex_positive_cached(size) 相当。
+// 元仕様通り、p + q * 16^(-r) の形で作る。
 // ------------------------------------------------------------
 
-function genSizeHexCached(size) {
-  if (genSizeHexCache.has(size)) {
-    return genSizeHexCache.get(size);
-  }
+const GEN_SIZE_HEX_POSITIVE_CACHE = new Map();
 
-  const seen = new Set();
+function genSizeHexPositiveCached(size) {
+  return getCached(GEN_SIZE_HEX_POSITIVE_CACHE, size, () => {
+    if (size < 0) {
+      return new Set();
+    }
 
-  for (const [leftSize, rightSize] of hexPairs(size)) {
-    const P = size2int(leftSize);
-    const Q = size2int(rightSize);
+    const out = new Set();
 
-    for (let r = 0; r < R_MAX; r++) {
-      const stepBig = HEX_POW_BIG[r];
-      const scale = 16 ** (-r);
+    for (const [leftSize, rightSize] of hexPairs(size)) {
+      const P = size2int(leftSize);
+      const Q = size2int(rightSize);
 
-      for (let p = 0; p < P; p++) {
-        const qCount = minBigIntAsNumber(
-          Q,
-          BigInt(P - p) * stepBig
-        );
+      for (let r = 0; r < R_MAX; r++) {
+        const step = HEX_POW[r];
+        const scale = HEX_SCALES[r];
 
-        for (let q = 0; q < qCount; q++) {
-          const val = p + q * scale;
+        for (let p = 0; p < P; p++) {
+          const qLim = Math.min(Q, (P - p) * step);
 
-          if (val !== 0) {
-            seen.add(val);
-            seen.add(-val);
+          for (let q = 0; q < qLim; q++) {
+            if (p !== 0 || q !== 0) {
+              out.add(p + q * scale);
+            }
           }
         }
       }
     }
-  }
 
-  genSizeHexCache.set(size, seen);
-  return seen;
+    return out;
+  });
 }
 
 
 // ------------------------------------------------------------
-// _gen_size_cached(size)
-// Python 版では frozenset[float]
-// JS 版では Set<number>
+// Positive cumulative gen_size
+//
+// 旧 gen_size(size) から正数だけを取り出した累積集合。
+// public には出さず、shell 計算用に使う。
 // ------------------------------------------------------------
 
-function genSizeCached(size) {
-  if (genSizeCache.has(size)) {
-    return genSizeCache.get(size);
-  }
+const GEN_SIZE_POSITIVE_CUMULATIVE_CACHE = new Map();
 
-  const seen = new Set();
-
-  function addNumber(x) {
-    if (x !== 0) {
-      seen.add(x);
+function genSizePositiveCumulativeCached(size) {
+  return getCached(GEN_SIZE_POSITIVE_CUMULATIVE_CACHE, size, () => {
+    if (size < 0) {
+      return new Set();
     }
-  }
 
-  // decimal 本体
-  for (const a of genSizeDecCached(size)) {
-    addNumber(decToNumber(a));
-  }
+    const out = new Set();
 
-  // decimal を 10^r 倍
-  for (const shift of POW10_SHIFT) {
-    for (const p of genSizeDecCached(size - 1)) {
-      addNumber(decMulPow10ToNumber(p, shift));
+    // decimal body
+    for (const x of genSizeDecPositiveCached(size)) {
+      out.add(x);
     }
-  }
 
-  // hex 本体
-  for (const a of genSizeHexCached(size)) {
-    addNumber(a);
-  }
-
-  // hex を 2^r 倍
-  for (const shift of POW2_SHIFT) {
-    const scale = 2 ** shift;
-
-    for (const p of genSizeHexCached(size - 2)) {
-      addNumber(p * scale);
+    // decimal shifted
+    if (size - 1 >= 0) {
+      for (const x of genSizeDecPositiveCached(size - 1)) {
+        for (const scale of POW10_SHIFT) {
+          const y = x * scale;
+          if (y !== 0) {
+            out.add(y);
+          }
+        }
+      }
     }
-  }
 
-  // pi 追加
-  if (size >= 1) {
-    seen.add(Math.PI);
-  }
+    // hex body
+    for (const x of genSizeHexPositiveCached(size)) {
+      out.add(x);
+    }
 
-  if (size >= 2) {
-    seen.add(-Math.PI);
-  }
+    // hex shifted
+    if (size - 2 >= 0) {
+      for (const x of genSizeHexPositiveCached(size - 2)) {
+        for (const scale of POW2_SHIFT) {
+          const y = x * scale;
+          if (y !== 0) {
+            out.add(y);
+          }
+        }
+      }
+    }
 
-  // Python の seen.discard(0.0) 相当
-  seen.delete(0);
+    // pi
+    if (size >= 1) {
+      out.add(Math.PI);
+    }
 
-  genSizeCache.set(size, seen);
-  return seen;
+    out.delete(0);
+    out.delete(-0);
+
+    return out;
+  });
 }
 
 
 // ------------------------------------------------------------
-// 公開関数 gen_size(size)
+// Public gen_size
 //
-// Python:
-// def gen_size(size: int) -> set:
-//     return set(_gen_size_cached(size))
+// 重要:
+//   この gen_size(size) は、旧 gen_size(size) ではなく、
+//   旧 positive_shell(size) と同じ意味。
 //
-// JS:
-// キャッシュ本体は共有しつつ、呼び出しごとに新しい Set を返す。
+// つまり:
+//   old positive_shell(t)
+//     = old_gen_size(t) の正数のうち、old_gen_size(t - 1) にないもの
+//
+//   new gen_size(t)
+//     = 上と同じ候補列
+//
+// 返り値は Array。
+// 高速化のため cached array をそのまま返す。
+// 呼び出し側では破壊的変更しないこと。
 // ------------------------------------------------------------
+
+const GEN_SIZE_POSITIVE_SHELL_CACHE = new Map();
+
+function genSizePositiveShellCached(size) {
+  return getCached(GEN_SIZE_POSITIVE_SHELL_CACHE, size, () => {
+    if (size < 1) {
+      return [];
+    }
+
+    if (size > MAX_SCAN_SIZE) {
+      throw new RangeError(
+        `optimized gen_size only supports sizes 1..${MAX_SCAN_SIZE}; got ${size}`
+      );
+    }
+
+    const cur = genSizePositiveCumulativeCached(size);
+    const prev = genSizePositiveCumulativeCached(size - 1);
+
+    const out = [];
+
+    for (const a of cur) {
+      if (!prev.has(a)) {
+        out.push(a);
+      }
+    }
+
+    return out;
+  });
+}
 
 function gen_size(size) {
-  return new Set(genSizeCached(size));
+  return genSizePositiveShellCached(size);
+}
+
+
+// ------------------------------------------------------------
+// Compatibility: gen_int
+//
+// 現状の scan.js では不要だが、古いコードが gen_int を参照しても
+// 壊れないように残す。
+// ------------------------------------------------------------
+
+const GEN_INT_CACHE = new Map();
+
+function genIntCached(size) {
+  return getCached(GEN_INT_CACHE, size, () => {
+    if (size < 0) {
+      return new Set();
+    }
+
+    const out = new Set();
+
+    const P = size2int(size);
+    const Q = size2int(size - 1);
+
+    for (let x = 1 - P; x < P; x++) {
+      out.add(x);
+    }
+
+    for (let p = 1 - Q; p < Q; p++) {
+      for (const scale of TEN_POW) {
+        out.add(p * scale);
+      }
+    }
+
+    return out;
+  });
+}
+
+function gen_int(size) {
+  return new Set(genIntCached(size));
+}
+
+
+// ------------------------------------------------------------
+// Optional exports for browser global use
+// ------------------------------------------------------------
+
+if (typeof window !== "undefined") {
+  window.R_MAX = R_MAX;
+  window.gen_size = gen_size;
+  window.gen_int = gen_int;
 }
