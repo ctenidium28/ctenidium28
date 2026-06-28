@@ -48,7 +48,10 @@
     </section>
 
     <section class="panel">
-      <h2>Result</h2>
+      <div class="panel-header">
+        <h2>Result</h2>
+        <button id="copyResultButton" type="button" class="copy-button">Copy</button>
+      </div>
       <pre id="resultOutput">Ready.</pre>
     </section>
 
@@ -58,38 +61,27 @@
         Color values must contain integers from 0 to 16.
       </p>
       <p>
-        Duplicate x_in values are rejected.
-      </p>
-      <p>
-        As a rough guideline, inputs with length 7 or less may finish within five minutes.
-        Longer inputs are usually not practical.
-      </p>
-      <p>
         The input does not need to be in ascending order. It will be sorted automatically.
       <p/>
       <p>
-        Please note that errors may occur in the output results.
+        Pressing the Stop button will cancel the scan. There is no resume function.
       </p>
       <p>
-        Pressing the Stop button will cancel the scan. There is no resume function.
+        Credit is optional, but I would be grateful if you could include a link in your submitted code.
       </p>
     </section>
 
     <section class="panel notes">
-      <h2>More Details</h2>
+      <h2>Update History</h2>
       <p>
-        There is a rule of thumb known as the "n+1 rule" regarding the number of inputs and tokens.
-        For instance, if you assign random colors to an input of length 5, such as "input = [-2, -1, 0, 1, 2]",
-        the most frequently detected pattern will be a 6-token expression.
+        Jun 28 : Added a^x%b, x/a%b to the scanning expressions.<br>
+        Improved the scanning speed significantly.<br>
+        Added "Copy" button.
       </p>
       <p>
-        Currently, the only expressions being scanned are "a^x", "a^x/b", "b/a^x", and "a^x*b".
-        Therefore, inputs containing spaces, such as input = [-2,-1, 0, 1, 2], color = [2, 5, 1, 0, 3], are not found.
-      </p>
+        Jun 19 / 2026 : Released!<br>
+        Scanning expressions are a^x, a^x/b, b/a^x, a^x*b.
       <p>
-        Scans that do not include 0 in the input are expected to take a very long time.
-        Therefore, if you know the color for 0, I recommend including it in the input.
-      </p>
     </section>
 
   </main>
