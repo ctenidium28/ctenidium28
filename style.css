@@ -214,3 +214,33 @@ button.primary:disabled:hover,
 button.stop:disabled:hover {
   background: #30363d;
 }
+
+/* Inline code */
+code {
+  font-family: inherit;
+  font-size: 0.95em;
+  line-height: 1;
+  padding: 0.08em 0.32em;
+  border: 1px solid rgba(180, 190, 210, 0.22);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f0f3ff;
+  white-space: nowrap;
+}
+
+/* Code inside notes/history text */
+.notes code {
+  background: rgba(255, 255, 255, 0.075);
+  border-color: rgba(180, 190, 210, 0.26);
+}
+
+/* Code inside buttons/headings should not get boxed accidentally */
+button code,
+h1 code,
+h2 code,
+h3 code {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+}
