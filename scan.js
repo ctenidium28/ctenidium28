@@ -1,70 +1,26 @@
 "use strict";
 
 // ------------------------------------------------------------
-// Utilities
+// Scan control
 // ------------------------------------------------------------
 
-const LIMIT = 2 ** 63 - 512;
-
-function spow(a, b) {
-  try {
-    const y = a ** b;
-    return Number.isNaN(y) ? 0 : y;
-  } catch {
-    return 0;
+class ScanCancelled extends Error {
+  constructor() {
+    super("Scan stopped.");
+    this.name = "ScanCancelled";
   }
 }
 
-function sdiv(a, b) {
-  try {
-    if (b === 0) return 0;
-    const y = a / b;
-    return Number.isNaN(y) ? 0 : y;
-  } catch {
-    return 0;
+let currentScanState = null;
+
+function checkCancelled(cancelState) {
+  if (cancelState && cancelState.cancelled) {
+    throw new ScanCancelled();
   }
 }
 
-function smul(a, b) {
-  try {
-    const y = a * b;
-    return Number.isNaN(y) ? 0 : y;
-  } catch {
-    return 0;
-  }
-}
-
-function smod(a, b) {
-  try {
-    if (b === 0) return 0;
-
-    // Python-compatible modulo:
-    // Python: a % b == a - floor(a / b) * b
-    const y = a - Math.floor(a / b) * b;
-    return Number.isNaN(y) ? 0 : y;
-  } catch {
-    return 0;
-  }
-}
-
-function disp(x) {
-  try {
-    const fx = Number(x);
-
-    if (!Number.isFinite(fx)) {
-      return 0;
-    }
-
-    const v = Math.floor(fx % 16);
-
-    if (1 <= fx && fx < LIMIT) {
-      return v + ((v - 1) & 16);
-    }
-
-    return 0;
-  } catch {
-    return 0;
-  }
+function sleep0() {
+  return new Promise(resolve => setTimeout(resolve, 0));
 }
 
 function isIntegerValue(x) {
@@ -85,36 +41,11 @@ function rangeAll(start, end, pred) {
   return true;
 }
 
-function sleep0() {
-  return new Promise(resolve => setTimeout(resolve, 0));
-}
-
-class ScanStop extends Error {
-  constructor(message) {
-    super(String(message));
-    this.name = "ScanStop";
-    this.messageText = String(message);
-  }
-}
-
-class ScanCancelled extends Error {
-  constructor() {
-    super("Scan stopped.");
-    this.name = "ScanCancelled";
-  }
-}
-
-function drop(exp) {
-  throw new ScanStop(exp);
-}
-
-let currentScanState = null;
-
-function checkCancelled(cancelState) {
-  if (cancelState && cancelState.cancelled) {
-    throw new ScanCancelled();
-  }
-}
+const FUNC_LIST = [
+  ["sin", Math.sin],
+  ["cos", Math.cos],
+  ["tan", Math.tan],
+];
 
 // ------------------------------------------------------------
 // Core scan
@@ -148,6 +79,9 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
 
   const maxOut = Math.max(...xOut);
 
+  const zeroCount = xOut.filter(x => x === 0).length;
+  const zeroRatio = zeroCount / leng;
+
   // Sort x_in ascending together with x_out.
   const pairs = xIn.map((xi, i) => ({ xi, xo: xOut[i] }));
   pairs.sort((a, b) => a.xi - b.xi);
@@ -155,11 +89,16 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
   xIn = pairs.map(p => p.xi);
   xOut = pairs.map(p => p.xo);
 
+  const coloredIdx = [];
+  for (let i = 0; i < leng; i++) {
+    if (xOut[i] > 0) coloredIdx.push(i);
+  }
+
   const isInt = xIn.every(x => isIntegerValue(x));
 
   const sList = [
     xIn,
-    xIn.map(x => -x)
+    xIn.map(x => -x),
   ];
 
   const sStr = ["", "-"];
@@ -168,22 +107,16 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
     sList.push(
       xIn.map(x => -x - 1),
       xIn.map(x => x + 1),
-      xIn.map(x => x - 1)
+      xIn.map(x => x - 1),
     );
     sStr.push("~", "-~", "~-");
   }
 
-  // Effective domain/codomain interval.
   let l0 = 0;
   let r0 = leng;
 
-  while (xOut[l0] === 0) {
-    l0++;
-  }
-
-  while (xOut[r0 - 1] === 0) {
-    r0--;
-  }
+  while (xOut[l0] === 0) l0++;
+  while (xOut[r0 - 1] === 0) r0--;
 
   const xCod = xOut.slice(l0, r0);
   const isDense = !xCod.includes(0);
@@ -192,13 +125,12 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
 
   async function maybeYield(token, sym) {
     checkCancelled(cancelState);
-
     workCounter++;
 
     if ((workCounter & 4095) === 0) {
       if (onProgress) {
         onProgress(
-          `Scanning... token=${token}, symbol="${sym || "x"}", checks=${workCounter}`
+          `Scanning... token=${token}, symbol="${sym || "x"}", checks=${workCounter}`,
         );
       }
 
@@ -231,7 +163,6 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
         return false;
       }
     }
-
     return true;
   }
 
@@ -326,36 +257,36 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
             if (inc) {
               if (r0 < leng) {
                 const border = LIMIT ** (1 / sx[r0]);
-                A = Array.from(gen_size(tokenRange)).filter(a => a >= border);
+                A = gen_size(tokenRange).filter(a => a >= border);
               } else {
                 const border = LIMIT ** (1 / sx[sx.length - 1]);
-                A = Array.from(gen_size(tokenRange)).filter(a => 1 < a && a < border);
+                A = gen_size(tokenRange).filter(a => 1 < a && a < border);
               }
             } else {
               if (l0 > 0) {
                 const border = LIMIT ** (1 / sx[l0 - 1]);
-                A = Array.from(gen_size(tokenRange)).filter(a => a >= border);
+                A = gen_size(tokenRange).filter(a => a >= border);
               } else {
                 const border = LIMIT ** (1 / sx[0]);
-                A = Array.from(gen_size(tokenRange)).filter(a => 1 < a && a < border);
+                A = gen_size(tokenRange).filter(a => 1 < a && a < border);
               }
             }
           } else if (isDomMinus) {
             if (inc) {
               if (l0 > 0) {
                 const border = LIMIT ** (1 / sx[l0 - 1]);
-                A = Array.from(gen_size(tokenRange)).filter(a => a <= border);
+                A = gen_size(tokenRange).filter(a => a <= border);
               } else {
                 const border = LIMIT ** (1 / sx[0]);
-                A = Array.from(gen_size(tokenRange)).filter(a => border < a && a < 1);
+                A = gen_size(tokenRange).filter(a => border < a && a < 1);
               }
             } else {
               if (r0 < leng) {
                 const border = LIMIT ** (1 / sx[r0]);
-                A = Array.from(gen_size(tokenRange)).filter(a => a <= border);
+                A = gen_size(tokenRange).filter(a => a <= border);
               } else {
                 const border = LIMIT ** (1 / sx[sx.length - 1]);
-                A = Array.from(gen_size(tokenRange)).filter(a => border < a && a < 1);
+                A = gen_size(tokenRange).filter(a => border < a && a < 1);
               }
             }
           } else {
@@ -365,6 +296,61 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
           for (const a of A) {
             if (scan(sx, x => spow(a, x))) {
               drop(`${repFormat(tokenRange, a)}^${sym}x`);
+            }
+
+            await maybeYield(token, sym);
+          }
+        }
+
+        // ----------------------------------------------------
+        // x/a
+        // ----------------------------------------------------
+
+        if (inc) {
+          isDomPlus =
+            all(xDom, x => x >= 0) &&
+            rangeAll(0, l0, i => sx[i] <= 0);
+        } else {
+          isDomPlus =
+            all(xDom, x => x >= 0) &&
+            rangeAll(r0, leng, i => sx[i] <= 0);
+        }
+
+        if (inc) {
+          isDomMinus =
+            all(xDom, x => x <= 0) &&
+            rangeAll(r0, leng, i => sx[i] >= 0);
+        } else {
+          isDomMinus =
+            all(xDom, x => x <= 0) &&
+            rangeAll(0, l0, i => sx[i] >= 0);
+        }
+
+        if (
+          1 <= tokenRange &&
+          tokenRange <= 4 &&
+          zeroIndex !== -1 &&
+          xOut[zeroIndex] === 0 &&
+          (isDomPlus || isDomMinus) &&
+          (sym === "" || sym === "~" || sym === "~-")
+        ) {
+          let A;
+
+          if (isDomPlus && isDomMinus) {
+            drop(0);
+          } else if (isDomPlus) {
+            const m = Math.max(...xDom);
+            A = gen_size(tokenRange).filter(a => m / LIMIT < a && a < 1);
+          } else {
+            const m = Math.min(...xDom);
+            A = gen_size(tokenRange)
+              .filter(a => -m / LIMIT < a && a < 1)
+              .map(a => -a);
+          }
+
+          for (const a of A) {
+            if (scan(sx, x => sdiv(x, a))) {
+              drop(`${sym}x/${repFormat(tokenRange, a)}`);
             }
 
             await maybeYield(token, sym);
@@ -398,9 +384,8 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
 
             if (zeroIndex !== -1) {
               const y0 = xOut[zeroIndex];
-
-              B1Base = Array.from(B).filter(b => disp(1 / b) === y0);
-              B2Base = Array.from(B).filter(b => disp(b) === y0);
+              B1Base = B.filter(b => disp(1 / b) === y0);
+              B2Base = B.filter(b => disp(b) === y0);
             } else {
               B1Base = B;
               B2Base = B;
@@ -430,31 +415,25 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
                 const pMin = Math.min(pl, pr);
                 const pMax = Math.max(pl, pr);
 
-                // a^x / b:
-                // p_max / LIMIT < b <= p_min
                 const b1Low = pMax / LIMIT;
                 const b1High = pMin;
 
-                B1 = Array.from(B1Base).filter(
+                B1 = B1Base.filter(
                   b =>
                     b1Low <= b &&
                     b <= b1High &&
                     disp(sdiv(pl, b)) === yl &&
-                    disp(sdiv(pr, b)) === yr
+                    disp(sdiv(pr, b)) === yr,
                 );
 
                 if (useBByPowAndMul) {
-                  // b / a^x:
-                  // p_max <= b < LIMIT * p_min
                   const b2DivLow = pMax;
                   const b2DivHigh = LIMIT * pMin;
 
-                  // a^x * b:
-                  // 1 / p_min <= b < LIMIT / p_max
                   const b2MulLow = 1 / pMin;
                   const b2MulHigh = LIMIT / pMax;
 
-                  B2 = Array.from(B2Base).filter(
+                  B2 = B2Base.filter(
                     b =>
                       (
                         b2DivLow <= b &&
@@ -467,7 +446,7 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
                         b <= b2MulHigh &&
                         disp(smul(pl, b)) === yl &&
                         disp(smul(pr, b)) === yr
-                      )
+                      ),
                   );
                 } else {
                   B2 = [];
@@ -491,10 +470,7 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
                     repA = repFormat(t, a);
                   }
 
-                  drop(
-                    `${repA}^${sym}x/` +
-                    `${repFormat(bt, b)}`
-                  );
+                  drop(`${repA}^${sym}x/${repFormat(bt, b)}`);
                 }
 
                 await maybeYield(token, sym);
@@ -525,16 +501,25 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
           }
         }
       } else {
-        // ----------------------------------------------------
-        // a^x % b
-        // ----------------------------------------------------
-
         let tokenRange = token - symLen - 3;
+
+        const domPlus = all(xDom, x => x >= 0);
+        const domMinus = all(xDom, x => x <= 0);
+
+        // ----------------------------------------------------
+        // a^x%b
+        // ----------------------------------------------------
 
         if (
           tokenRange >= 2 &&
-          (zeroIndex === -1 || xOut[zeroIndex] === 1)
+          (zeroIndex === -1 || xOut[zeroIndex] === 1) &&
+          (domPlus || domMinus) &&
+          zeroRatio < 0.5
         ) {
+          if (domPlus && domMinus) {
+            drop(`0^${sym}x`);
+          }
+
           for (let t = 1; t < tokenRange; t++) {
             const bt = tokenRange - t;
 
@@ -542,16 +527,16 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
               continue;
             }
 
-            const A = gen_size(t);
-            const B = Array.from(gen_size(bt)).filter(b => b > maxOut);
+            const A = domPlus
+              ? gen_size(t).filter(a => a > 1)
+              : gen_size(t).filter(a => a < 1);
+
+            const B = gen_size(bt).filter(b => b > maxOut);
 
             for (const a of A) {
               for (const b of B) {
                 if (scan(sx, x => smod(spow(a, x), b))) {
-                  drop(
-                    `${repFormat(t, a)}^${sym}x%` +
-                    `${repFormat(bt, b)}`
-                  );
+                  drop(`${repFormat(t, a)}^${sym}x%${repFormat(bt, b)}`);
                 }
 
                 await maybeYield(token, sym);
@@ -561,13 +546,14 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
         }
 
         // ----------------------------------------------------
-        // x/a % b
+        // x/a%b
         // ----------------------------------------------------
 
         if (
           tokenRange >= 2 &&
           zeroIndex !== -1 &&
-          xOut[zeroIndex] === 0
+          xOut[zeroIndex] === 0 &&
+          zeroRatio < 0.5
         ) {
           for (let t = 1; t < tokenRange; t++) {
             const bt = tokenRange - t;
@@ -577,25 +563,186 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
             }
 
             const A = gen_size(t);
-            const B = Array.from(gen_size(bt)).filter(b => b > maxOut);
+            const B = gen_size(bt).filter(b => b > maxOut);
 
             for (const a of A) {
               for (const b of B) {
                 if (scan(sx, x => smod(sdiv(x, a), b))) {
                   if (sym === "-" || sym === "-~") {
-                    drop(
-                      `${sym.slice(1)}x/-${repFormat(t, a)}%` +
-                      `${repFormat(bt, b)}`
-                    );
+                    drop(`${sym.slice(1)}x/-${repFormat(t, a)}%${repFormat(bt, b)}`);
                   } else {
-                    drop(
-                      `${sym}x/${repFormat(t, a)}%` +
-                      `${repFormat(bt, b)}`
-                    );
+                    drop(`${sym}x/${repFormat(t, a)}%${repFormat(bt, b)}`);
                   }
                 }
 
                 await maybeYield(token, sym);
+              }
+            }
+          }
+        }
+
+        // ----------------------------------------------------
+        // f(x/a)/b, f(x/a)*b, f(x*a)/b, f(x*a)*b
+        // ----------------------------------------------------
+
+        tokenRange = token - symLen - 5;
+
+        if (tokenRange >= 2 && coloredIdx.length > 0 && zeroRatio >= 0.5) {
+          for (let t = 1; t < tokenRange; t++) {
+            const bt = tokenRange - t;
+
+            if (t > 4 || bt > 4) {
+              continue;
+            }
+
+            const A = gen_size(t);
+            const B = gen_size(bt);
+
+            for (const [symF, f] of FUNC_LIST) {
+              for (const a of A) {
+                let repA = null;
+
+                for (const mode of [0, 1]) {
+                  const vals = [];
+                  let ok = true;
+
+                  let innerOp;
+
+                  if (mode === 0) {
+                    for (const x of sx) {
+                      let v;
+
+                      try {
+                        v = f(sdiv(x, a));
+                      } catch {
+                        ok = false;
+                        break;
+                      }
+
+                      if (!Number.isFinite(v)) {
+                        ok = false;
+                        break;
+                      }
+
+                      vals.push(v);
+                    }
+
+                    innerOp = "/";
+                  } else {
+                    for (const x of sx) {
+                      let v;
+
+                      try {
+                        v = f(smul(x, a));
+                      } catch {
+                        ok = false;
+                        break;
+                      }
+
+                      if (!Number.isFinite(v)) {
+                        ok = false;
+                        break;
+                      }
+
+                      vals.push(v);
+                    }
+
+                    innerOp = "*";
+                  }
+
+                  if (!ok) {
+                    continue;
+                  }
+
+                  const first = vals[coloredIdx[0]];
+
+                  if (first === 0) {
+                    continue;
+                  }
+
+                  const fPos = first > 0;
+
+                  for (let k = 1; k < coloredIdx.length; k++) {
+                    const i = coloredIdx[k];
+                    const v = vals[i];
+
+                    if (v === 0 || (v > 0) !== fPos) {
+                      ok = false;
+                      break;
+                    }
+                  }
+
+                  if (!ok) {
+                    continue;
+                  }
+
+                  const useNegativeB = !fPos;
+                  const absVals = coloredIdx.map(i => Math.abs(vals[i]));
+
+                  const divLow = Math.max(...absVals) / LIMIT;
+                  const divHigh = Math.min(...absVals);
+
+                  const mulLow = Math.max(...absVals.map(v => 1 / v));
+                  const mulHigh = Math.min(...absVals.map(v => LIMIT / v));
+
+                  if (divLow > divHigh && mulLow > mulHigh) {
+                    continue;
+                  }
+
+                  for (const b0 of B) {
+                    const tryDiv = divLow <= b0 && b0 <= divHigh;
+                    const tryMul = mulLow <= b0 && b0 <= mulHigh;
+
+                    if (!tryDiv && !tryMul) {
+                      continue;
+                    }
+
+                    const b = useNegativeB ? -b0 : b0;
+
+                    if (repA === null) {
+                      repA = repFormat(t, a);
+                    }
+
+                    const repB = repFormat(bt, b);
+
+                    const inner =
+                      innerOp === "/"
+                        ? `${sym}x/${repA}`
+                        : `${sym}x*${repA}`;
+
+                    if (tryDiv) {
+                      let good = true;
+
+                      for (let i = 0; i < vals.length; i++) {
+                        if (disp(sdiv(vals[i], b)) !== xOut[i]) {
+                          good = false;
+                          break;
+                        }
+                      }
+
+                      if (good) {
+                        drop(`${symF}(${inner})/${repB}`);
+                      }
+                    }
+
+                    if (tryMul) {
+                      let good = true;
+
+                      for (let i = 0; i < vals.length; i++) {
+                        if (disp(smul(vals[i], b)) !== xOut[i]) {
+                          good = false;
+                          break;
+                        }
+                      }
+
+                      if (good) {
+                        drop(`${symF}(${inner})*${repB}`);
+                      }
+                    }
+
+                    await maybeYield(token, sym);
+                  }
+                }
               }
             }
           }
@@ -613,6 +760,7 @@ async function runExpressionScan(rawXIn, rawXOut, maxToken, onProgress, cancelSt
 
 const pairsBody = document.getElementById("pairsBody");
 const addRowButton = document.getElementById("addRowButton");
+const addNextRowButton = document.getElementById("addNextRowButton");
 const runButton = document.getElementById("runButton");
 const stopButton = document.getElementById("stopButton");
 const maxTokenInput = document.getElementById("maxTokenInput");
@@ -674,6 +822,26 @@ function addRow(xInValue = 0, xOutValue = 0) {
   renumberRows();
 }
 
+function addNextRow() {
+  const rows = Array.from(pairsBody.querySelectorAll("tr"));
+
+  if (rows.length === 0) {
+    addRow(0, 0);
+    return;
+  }
+
+  const lastRow = rows[rows.length - 1];
+  const lastXInput = lastRow.querySelector(".x-in-input");
+  const lastX = Number(lastXInput.value);
+
+  if (!Number.isFinite(lastX)) {
+    addRow(0, 0);
+    return;
+  }
+
+  addRow(lastX + 1, 0);
+}
+
 function readPairs() {
   const rows = Array.from(pairsBody.querySelectorAll("tr"));
 
@@ -706,6 +874,12 @@ addRowButton.addEventListener("click", () => {
   addRow(0, 0);
 });
 
+if (addNextRowButton) {
+  addNextRowButton.addEventListener("click", () => {
+    addNextRow();
+  });
+}
+
 if (stopButton) {
   stopButton.addEventListener("click", () => {
     if (currentScanState) {
@@ -715,60 +889,6 @@ if (stopButton) {
     }
   });
 }
-
-runButton.addEventListener("click", async () => {
-  resultOutput.textContent = "Scanning...";
-
-  const cancelState = { cancelled: false };
-  currentScanState = cancelState;
-
-  runButton.disabled = true;
-  addRowButton.disabled = true;
-  maxTokenInput.disabled = true;
-
-  if (stopButton) {
-    stopButton.disabled = false;
-  }
-
-  try {
-    const { xIn, xOut } = readPairs();
-    const maxToken = Number(maxTokenInput.value);
-
-    if (!Number.isInteger(maxToken) || maxToken < 3) {
-      throw new Error("Max token must be an integer greater than or equal to 3.");
-    }
-
-    await runExpressionScan(
-      xIn,
-      xOut,
-      maxToken,
-      message => {
-        resultOutput.textContent = message;
-      },
-      cancelState
-    );
-  } catch (e) {
-    if (e instanceof ScanCancelled) {
-      resultOutput.textContent = "Stopped.";
-    } else if (e instanceof ScanStop) {
-      resultOutput.textContent = e.messageText;
-    } else {
-      resultOutput.textContent = String(e && e.stack ? e.stack : e);
-    }
-  } finally {
-    if (currentScanState === cancelState) {
-      currentScanState = null;
-    }
-
-    runButton.disabled = false;
-    addRowButton.disabled = false;
-    maxTokenInput.disabled = false;
-
-    if (stopButton) {
-      stopButton.disabled = true;
-    }
-  }
-});
 
 if (copyResultButton) {
   copyResultButton.addEventListener("click", async () => {
@@ -791,7 +911,63 @@ if (copyResultButton) {
   });
 }
 
-// Default sample:
+runButton.addEventListener("click", async () => {
+  resultOutput.textContent = "Scanning...";
+
+  const cancelState = { cancelled: false };
+  currentScanState = cancelState;
+
+  runButton.disabled = true;
+  addRowButton.disabled = true;
+  if (addNextRowButton) addNextRowButton.disabled = true;
+  maxTokenInput.disabled = true;
+
+  if (stopButton) {
+    stopButton.disabled = false;
+  }
+
+  try {
+    const { xIn, xOut } = readPairs();
+    const maxToken = Number(maxTokenInput.value);
+
+    if (!Number.isInteger(maxToken) || maxToken < 3) {
+      throw new Error("Max token must be an integer greater than or equal to 3.");
+    }
+
+    await runExpressionScan(
+      xIn,
+      xOut,
+      maxToken,
+      message => {
+        resultOutput.textContent = message;
+      },
+      cancelState,
+    );
+  } catch (e) {
+    if (e instanceof ScanCancelled) {
+      resultOutput.textContent = "Stopped.";
+    } else if (e instanceof ScanStop) {
+      resultOutput.textContent = e.messageText;
+    } else {
+      resultOutput.textContent = String(e && e.stack ? e.stack : e);
+    }
+  } finally {
+    if (currentScanState === cancelState) {
+      currentScanState = null;
+    }
+
+    runButton.disabled = false;
+    addRowButton.disabled = false;
+    if (addNextRowButton) addNextRowButton.disabled = false;
+    maxTokenInput.disabled = false;
+
+    if (stopButton) {
+      stopButton.disabled = true;
+    }
+  }
+});
+
+// Default sample
 addRow(-1, 10);
 addRow(0, 9);
 addRow(1, 7);
