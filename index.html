@@ -17,7 +17,10 @@
     <section class="panel">
       <div class="panel-header">
         <h2>Input pairs</h2>
-        <button id="addRowButton" type="button">Add row</button>
+        <div class="button-row">
+          <button id="addRowButton" type="button">Add row</button>
+          <button id="addNextRowButton" type="button">Add next x</button>
+        </div>
       </div>
 
       <div class="table-wrap">
@@ -58,36 +61,42 @@
     <section class="panel notes">
       <h2>Notes</h2>
       <p>
-        Color values must contain integers from 0 to 16.
+        Target color values must contain integers from <code>0</code> to <code>16</code>.
       </p>
       <p>
-        The input does not need to be in ascending order. It will be sorted automatically.
-      <p/>
-      <p>
-        Pressing the Stop button will cancel the scan. There is no resume function.
+        Input rows do not need to be sorted by <code>x</code>. They will be sorted automatically.
       </p>
       <p>
-        Credit is optional, but I would be grateful if you could include a link in your submitted code.
+        The Stop button cancels the current scan, although it may not stop immediately during heavy computation.<br>
+        There is no resume function.
+      </p>
+      <p>
+        Attribution is optional, but I would appreciate it if you include a link to this page in your submitted code.
       </p>
     </section>
 
     <section class="panel notes">
       <h2>Update History</h2>
       <p>
-        Jun 28 : Added a^x%b, x/a%b to the scanning expressions.<br>
+        July 9, 2026 : Added <code>x/a</code>, <code>f(x/a)/b</code>, <code>f(x/a)*b</code>, <code>f(x*a)/b</code>, and <code>f(x*a)*b</code>, where <code>f</code> is <code>sin</code>, <code>cos</code>, or <code>tan</code>.<br>
+        Added "Add next x" button.
+      </p>
+      <p>
+        Jun 28, 2026 : Added <code>a^x%b</code>, <code>x/a%b</code> to the scanning expressions.<br>
         Improved the scanning speed significantly.<br>
         Added "Copy" button.
       </p>
       <p>
-        Jun 19 / 2026 : Released!<br>
-        Scanning expressions are a^x, a^x/b, b/a^x, a^x*b.
-      <p>
+        Jun 19, 2026 : Released!<br>
+        Scanning expressions are <code>a^x</code>, <code>a^x/b</code>, <code>b/a^x</code>, <code>a^x*b</code>.
+      </p>
     </section>
 
   </main>
 
-  <script src="gen_size.js"></script>
-  <script src="float_format.js"></script>
-  <script src="scan.js"></script>
+  <script src="./scan_core.js"></script>
+  <script src="./gen_size.js"></script>
+  <script src="./float_format.js"></script>
+  <script src="./scan.js"></script>
 </body>
 </html>
