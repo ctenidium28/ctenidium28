@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Token Exploiter</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -20,6 +21,7 @@
         <div class="button-row">
           <button id="addRowButton" type="button">Add row</button>
           <button id="addNextRowButton" type="button">Add next x</button>
+          <button id="allClearButton" type="button" class="danger">All Clear</button>
         </div>
       </div>
 
@@ -43,11 +45,48 @@
           <input id="maxTokenInput" type="number" min="3" step="1" value="8">
         </label>
 
-        <div class="button-row">
-          <button id="runButton" type="button" class="primary">Run scan</button>
-          <button id="stopButton" type="button" class="stop" disabled>Stop</button>
+        <div class="scan-actions">
+          <div class="button-row">
+            <button id="runButton" type="button" class="primary">Run scan</button>
+            <button id="stopButton" type="button" class="stop" disabled>Stop</button>
+          </div>
+
+          <fieldset class="scan-mode">
+            <legend class="visually-hidden">Scan mode</legend>
+
+            <input
+              id="modeQuick"
+              type="radio"
+              name="scanMode"
+              value="quick"
+            >
+            <label
+              for="modeQuick"
+              title="Prioritizes speed by using stronger heuristic pruning."
+            >
+              Quick
+            </label>
+
+            <input
+              id="modeBroad"
+              type="radio"
+              name="scanMode"
+              value="broad"
+              checked
+            >
+            <label
+              for="modeBroad"
+              title="Prioritizes coverage by searching a broader candidate set."
+            >
+              Broad
+            </label>
+          </fieldset>
         </div>
       </div>
+
+      <p class="control-note">
+        Quick prioritizes speed. Broad prioritizes search coverage.
+      </p>
     </section>
 
     <section class="panel">
@@ -55,20 +94,30 @@
         <h2>Result</h2>
         <button id="copyResultButton" type="button" class="copy-button">Copy</button>
       </div>
-      <pre id="resultOutput">Ready.</pre>
+      <pre id="resultOutput" aria-live="polite">Ready.</pre>
     </section>
 
     <section class="panel notes">
       <h2>Notes</h2>
       <p>
-        Target color values must contain integers from <code>0</code> to <code>16</code>.
+        Target color values must be integers from <code>0</code> to <code>16</code>.
       </p>
       <p>
         Input rows do not need to be sorted by <code>x</code>. They will be sorted automatically.
       </p>
       <p>
-        The Stop button cancels the current scan, although it may not stop immediately during heavy computation.<br>
-        There is no resume function.
+        Duplicate <code>x</code> values are not allowed.
+      </p>
+      <p>
+        The "Add next x" button adds a row whose <code>x</code> value is one greater than the last row.<br>
+        The "All Clear" button removes all input rows.
+      </p>
+      <p>
+        Quick mode uses stronger heuristic pruning to prioritize speed.<br>
+        Broad mode searches a wider candidate set, but neither mode is exhaustive.
+      </p>
+      <p>
+        The Stop button immediately cancels the active scan. There is no resume function.
       </p>
       <p>
         Attribution is optional, but I would appreciate it if you include a link to this page in your submitted code.
@@ -78,25 +127,27 @@
     <section class="panel notes">
       <h2>Update History</h2>
       <p>
-        July 9, 2026 : Added <code>x/a</code>, <code>f(x/a)/b</code>, <code>f(x/a)*b</code>, <code>f(x*a)/b</code>, and <code>f(x*a)*b</code>, where <code>f</code> is <code>sin</code>, <code>cos</code>, or <code>tan</code>.<br>
-        Added "Add next x" button.
+        July 29, 2026: Added Quick/Broad scan modes and the "All Clear" button.<br>
+        Moved the scan to a Web Worker so that the Stop button can immediately cancel heavy computation.<br>
+        Added <code>x^a</code>, <code>x&amp;a</code>, <code>x|a</code>, <code>x~a</code>, and <code>a (shift operator) x (bitwise operator) b</code>.<br>
+        Significantly improved scanning speed for <code>a^x%b</code> and <code>x/a%b</code>.<br>
       </p>
       <p>
-        Jun 28, 2026 : Added <code>a^x%b</code>, <code>x/a%b</code> to the scanning expressions.<br>
-        Improved the scanning speed significantly.<br>
-        Added "Copy" button.
+        July 9, 2026: Added <code>x/a</code>, <code>f(x/a)/b</code>, <code>f(x/a)*b</code>, <code>f(x*a)/b</code>, and <code>f(x*a)*b</code>, where <code>f</code> is <code>sin</code>, <code>cos</code>, or <code>tan</code>.<br>
+        Added the "Add next x" button.
       </p>
       <p>
-        Jun 19, 2026 : Released!<br>
-        Scanning expressions are <code>a^x</code>, <code>a^x/b</code>, <code>b/a^x</code>, <code>a^x*b</code>.
+        June 28, 2026: Added <code>a^x%b</code> and <code>x/a%b</code> to the scanning expressions.<br>
+        Significantly improved scanning speed.<br>
+        Added the "Copy" button.
+      </p>
+      <p>
+        June 19, 2026: Released the first version.<br>
+        Initial scanning expressions: <code>a^x</code>, <code>a^x/b</code>, <code>b/a^x</code>, and <code>a^x*b</code>.
       </p>
     </section>
-
   </main>
 
-  <script src="scan_core.js"></script>
-  <script src="gen_size.js"></script>
-  <script src="float_format.js"></script>
   <script src="scan.js"></script>
 </body>
 </html>
