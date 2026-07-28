@@ -126,9 +126,9 @@ button:hover {
 }
 
 button.primary {
+  color: #ffffff;
   background: #238636;
   border-color: #2ea043;
-  color: #ffffff;
 }
 
 button.primary:hover {
@@ -137,6 +137,39 @@ button.primary:hover {
 
 button.danger {
   color: #ffb4b4;
+}
+
+button.danger:hover:not(:disabled) {
+  background: #3b2428;
+  border-color: #6e363d;
+}
+
+button.stop {
+  color: #ffd7d7;
+  background: #5f2120;
+  border-color: #8b3431;
+}
+
+button.stop:hover:not(:disabled) {
+  background: #7a2b28;
+}
+
+button:disabled,
+button.primary:disabled,
+button.stop:disabled,
+button.danger:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  color: #8b949e;
+  background: #30363d;
+  border-color: #484f58;
+}
+
+button:disabled:hover,
+button.primary:disabled:hover,
+button.stop:disabled:hover,
+button.danger:disabled:hover {
+  background: #30363d;
 }
 
 .controls {
@@ -151,6 +184,96 @@ button.danger {
   gap: 6px;
   min-width: 140px;
   color: #9aa7b2;
+}
+
+.button-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.scan-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.scan-mode {
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 0;
+  padding: 3px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 7px;
+}
+
+.scan-mode input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.scan-mode label {
+  min-width: 76px;
+  padding: 6px 12px;
+  color: #9aa7b2;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.scan-mode label:hover {
+  color: #e6edf3;
+  background: #21262d;
+}
+
+.scan-mode input:checked + label {
+  color: #ffffff;
+  background: #30363d;
+  border-color: #484f58;
+}
+
+.scan-mode input:focus-visible + label {
+  outline: 2px solid #58a6ff;
+  outline-offset: 2px;
+}
+
+.scan-mode input:disabled + label {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.scan-mode input:disabled + label:hover {
+  color: #9aa7b2;
+  background: transparent;
+}
+
+.control-note {
+  margin: 8px 0 0;
+  color: #8b949e;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  white-space: nowrap;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
 }
 
 pre {
@@ -170,62 +293,17 @@ pre {
   line-height: 1.55;
 }
 
-@media (max-width: 640px) {
-  .panel-header,
-  .controls {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  td:last-child,
-  th:last-child {
-    width: auto;
-  }
-}
-
-.button-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-button.stop {
-  background: #5f2120;
-  border-color: #8b3431;
-  color: #ffd7d7;
-}
-
-button.stop:hover:not(:disabled) {
-  background: #7a2b28;
-}
-
-button:disabled,
-button.primary:disabled,
-button.stop:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-  background: #30363d;
-  border-color: #484f58;
-  color: #8b949e;
-}
-
-button:disabled:hover,
-button.primary:disabled:hover,
-button.stop:disabled:hover {
-  background: #30363d;
-}
-
 /* Inline code */
 code {
   font-family: inherit;
   font-size: 0.95em;
-  line-height: 1;
+  line-height: inherit;
   padding: 0.08em 0.32em;
-  border: 1px solid rgba(180, 190, 210, 0.22);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.06);
   color: #f0f3ff;
   white-space: nowrap;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(180, 190, 210, 0.22);
+  border-radius: 4px;
 }
 
 /* Code inside notes/history text */
@@ -240,7 +318,37 @@ h1 code,
 h2 code,
 h3 code {
   padding: 0;
-  border: none;
-  background: transparent;
   color: inherit;
+  background: transparent;
+  border: none;
+}
+
+@media (max-width: 640px) {
+  .panel-header,
+  .controls,
+  .scan-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .button-row {
+    width: 100%;
+  }
+
+  .button-row button {
+    flex: 1 1 auto;
+  }
+
+  .scan-mode {
+    width: 100%;
+  }
+
+  .scan-mode label {
+    min-width: 0;
+  }
+
+  td:last-child,
+  th:last-child {
+    width: auto;
+  }
 }
