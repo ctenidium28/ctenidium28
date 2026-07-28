@@ -406,47 +406,82 @@ function gen_size(size) {
 
 
 // ------------------------------------------------------------
-// Compatibility: gen_int
+// Exact integer shell
+//
+// Python の gen_int(token_size) と同じく、
+// 「ちょうど tokenSize tokens」の符号付き整数だけを返す。
+//
+// 有効な tokenSize:
+//   1, 2, 4, 8, ...
+//
+// 例:
+//   gen_int(1): -16 ... 16
+//   gen_int(2): -256 ... -17, 17 ... 256
+//   gen_int(4): -4096 ... -257, 257 ... 4096
+//
+// 1e3 のような指数表記によって短く表現できる整数は生成しない。
 // ------------------------------------------------------------
 
 const GEN_INT_CACHE = new Map();
 
-function genIntCached(size) {
-  return getCached(GEN_INT_CACHE, size, () => {
-    if (size < 0) {
-      return new Set();
+function genIntCached(tokenSize) {
+  return getCached(GEN_INT_CACHE, tokenSize, () => {
+    if (
+      !Number.isInteger(tokenSize) ||
+      tokenSize < 1 ||
+      !is_2pow(tokenSize)
+    ) {
+      return Object.freeze([]);
     }
 
-    const out = new Set();
+    const upper = size2int(tokenSize);
+    const out = [];
 
-    const P = size2int(size);
-    const Q = size2int(size - 1);
-
-    for (let x = 1 - P; x < P; x++) {
-      out.add(x);
-    }
-
-    for (let p = 1 - Q; p < Q; p++) {
-      for (let r = 0; r < R_MAX; r++) {
-        out.add(p * (10 ** r));
+    if (tokenSize === 1) {
+      for (let x = 1 - upper; x < upper; x++) {
+        out.push(x);
       }
+
+      return Object.freeze(out);
     }
 
-    return out;
+    const lower = size2int(tokenSize / 2);
+
+    // 負側:
+    //   1-upper <= x < 1-lower
+    //
+    // 例: tokenSize=2
+    //   -256 ... -17
+    for (let x = 1 - upper; x < 1 - lower; x++) {
+      out.push(x);
+    }
+
+    // 正側:
+    //   lower <= x < upper
+    //
+    // 例: tokenSize=2
+    //   17 ... 256
+    for (let x = lower; x < upper; x++) {
+      out.push(x);
+    }
+
+    return Object.freeze(out);
   });
 }
 
-function gen_int(size) {
-  return new Set(genIntCached(size));
+function gen_int(tokenSize) {
+  return genIntCached(tokenSize);
 }
 
 
 // ------------------------------------------------------------
-// Browser globals
+// Browser / Web Worker globals
+//
+// globalThis は通常のブラウザ画面と Web Worker の両方で利用できる。
 // ------------------------------------------------------------
 
-if (typeof window !== "undefined") {
-  window.R_MAX = R_MAX;
-  window.gen_size = gen_size;
-  window.gen_int = gen_int;
-}
+globalThis.R_MAX = R_MAX;
+globalThis.MAX_SCAN_SIZE = MAX_SCAN_SIZE;
+globalThis.size2int = size2int;
+globalThis.gen_size = gen_size;
+globalThis.gen_int = gen_int;
