@@ -823,6 +823,262 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
       }
 
       // ------------------------------------------------------
+      // (-a)^x/b, b/(-a)^x, (-a)^x*b
+      // ------------------------------------------------------
+      //
+      // 負の底は、指数 sx が全点で整数の場合だけ扱う。
+      // colored 点の指数はすべて同じ偶奇でなければならない。
+      //
+      // 括弧を1 tokenとして追加で数える:
+      //   (-a)^x*b
+      // ------------------------------------------------------
+
+      tokenRange = token - symLen - 4;
+
+      let negativePowerOk = false;
+      let coloredParity = null;
+      let sxParity = null;
+
+      if (isInt && tokenRange >= 2) {
+        sxParity = sx.map(x => Math.abs(x % 2));
+        coloredParity = sxParity[coloredIdx[0]];
+
+        let sameColoredParity = true;
+
+        for (const i of coloredIdx) {
+          if (sxParity[i] !== coloredParity) {
+            sameColoredParity = false;
+            break;
+          }
+        }
+
+        let hasOppositeParity = false;
+
+        for (const parity of sxParity) {
+          if (parity !== coloredParity) {
+            hasOppositeParity = true;
+            break;
+          }
+        }
+
+        let parityDense = true;
+
+        for (let i = l0; i < r0; i++) {
+          if (xOut[i] === 0 && sxParity[i] === coloredParity) {
+            parityDense = false;
+            break;
+          }
+        }
+
+        negativePowerOk =
+          sameColoredParity &&
+          hasOppositeParity &&
+          parityDense;
+
+        if (quick && negativePowerOk) {
+          // Quickでは、0点がすべて偶奇による符号反転だけで
+          // 説明できる場合に限定する。
+          for (let i = 0; i < leng; i++) {
+            if (xOut[i] === 0 && sxParity[i] === coloredParity) {
+              negativePowerOk = false;
+              break;
+            }
+          }
+        }
+      }
+
+      if (negativePowerOk) {
+        const li = l0;
+        const ri = r0 - 1;
+        const yl = xOut[li];
+        const yr = xOut[ri];
+
+        // colored 点の (-a)^x と同符号の b だけが有効。
+        const bSign = coloredParity === 0 ? 1 : -1;
+
+        for (let t = 1; t < tokenRange; t++) {
+          const bt = tokenRange - t;
+
+          if (t > 4 || bt > 4) {
+            continue;
+          }
+
+          const AAbs = gen_size(t);
+          const BAbs = gen_size(bt);
+
+          let B1Base;
+          let B2Base;
+
+          if (zeroIndex !== -1) {
+            const y0 = xOut[zeroIndex];
+
+            B1Base = BAbs.filter(
+              b0 => disp(sdiv(1, bSign * b0)) === y0,
+            );
+
+            B2Base = BAbs.filter(
+              b0 => disp(bSign * b0) === y0,
+            );
+          } else {
+            B1Base = BAbs;
+            B2Base = BAbs;
+          }
+
+          if (B1Base.length === 0 && B2Base.length === 0) {
+            continue;
+          }
+
+          const useBByPowAndMul =
+            sym === "" || sym === "~" || sym === "~-";
+
+          for (const aAbs of AAbs) {
+            const negativeA = -aAbs;
+            const pl = spow(negativeA, sx[li]);
+            const pr = spow(negativeA, sx[ri]);
+
+            const canFilterByEndpoint =
+              typeof pl === "number" &&
+              typeof pr === "number" &&
+              Number.isFinite(pl) &&
+              Number.isFinite(pr) &&
+              pl !== 0 &&
+              pr !== 0 &&
+              (pl > 0) === (pr > 0);
+
+            let B1;
+            let B2;
+
+            if (canFilterByEndpoint) {
+              const pMin = Math.min(Math.abs(pl), Math.abs(pr));
+              const pMax = Math.max(Math.abs(pl), Math.abs(pr));
+
+              const b1Low = pMax / LIMIT;
+              const b1High = pMin;
+
+              B1 = B1Base
+                .filter(
+                  b0 =>
+                    b1Low <= b0 &&
+                    b0 <= b1High &&
+                    disp(sdiv(pl, bSign * b0)) === yl &&
+                    disp(sdiv(pr, bSign * b0)) === yr,
+                )
+                .map(b0 => bSign * b0);
+
+              if (useBByPowAndMul) {
+                const b2DivLow = pMax;
+                const b2DivHigh = LIMIT * pMin;
+
+                const b2MulLow = 1 / pMin;
+                const b2MulHigh = LIMIT / pMax;
+
+                B2 = B2Base
+                  .filter(
+                    b0 =>
+                      (
+                        b2DivLow <= b0 &&
+                        b0 <= b2DivHigh &&
+                        disp(sdiv(bSign * b0, pl)) === yl &&
+                        disp(sdiv(bSign * b0, pr)) === yr
+                      ) ||
+                      (
+                        b2MulLow <= b0 &&
+                        b0 <= b2MulHigh &&
+                        disp(smul(pl, bSign * b0)) === yl &&
+                        disp(smul(pr, bSign * b0)) === yr
+                      ),
+                  )
+                  .map(b0 => bSign * b0);
+              } else {
+                B2 = [];
+              }
+            } else {
+              B1 = B1Base.map(b0 => bSign * b0);
+              B2 = useBByPowAndMul
+                ? B2Base.map(b0 => bSign * b0)
+                : [];
+            }
+
+            if (B1.length === 0 && B2.length === 0) {
+              continue;
+            }
+
+            const powVals = sx.map(x => spow(negativeA, x));
+            let repBase = null;
+
+            for (const b of B1) {
+              let good = true;
+
+              for (let i = 0; i < powVals.length; i++) {
+                if (disp(sdiv(powVals[i], b)) !== xOut[i]) {
+                  good = false;
+                  break;
+                }
+              }
+
+              if (good) {
+                if (repBase === null) {
+                  repBase = `(${formatConstant(t, negativeA)})`;
+                }
+
+                finish(
+                  `${repBase}^${sym}x/${formatConstant(bt, b)}`,
+                );
+              }
+
+              reportProgress(token, sym);
+            }
+
+            for (const b of B2) {
+              let okDiv = true;
+              let okMul = true;
+
+              for (let i = 0; i < powVals.length; i++) {
+                const p = powVals[i];
+                const y = xOut[i];
+
+                if (okDiv && disp(sdiv(b, p)) !== y) {
+                  okDiv = false;
+                }
+
+                if (okMul && disp(smul(p, b)) !== y) {
+                  okMul = false;
+                }
+
+                if (!okDiv && !okMul) {
+                  break;
+                }
+              }
+
+              let result = null;
+
+              if (okDiv) {
+                result = "div";
+              } else if (okMul) {
+                result = "mul";
+              }
+
+              if (result !== null) {
+                if (repBase === null) {
+                  repBase = `(${formatConstant(t, negativeA)})`;
+                }
+
+                const repB = formatConstant(bt, b);
+
+                if (result === "div") {
+                  finish(`${repB}/${repBase}^${sym}x`);
+                } else {
+                  finish(`${repBase}^${sym}x*${repB}`);
+                }
+              }
+
+              reportProgress(token, sym);
+            }
+          }
+        }
+      }
+
+      // ------------------------------------------------------
       // a^x%b
       // ------------------------------------------------------
 
