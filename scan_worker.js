@@ -171,7 +171,9 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
     throw new Error("x_out must contain integers from 0 to 16.");
   }
 
-  if (new Set(xOut).size === 1) {
+  const numColor = new Set(xOut).size;
+
+  if (numColor <= 1) {
     finish(xOut[0]);
   }
 
@@ -306,6 +308,42 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
 
       if (token === zeroPowToken && zeroPowOk) {
         finish(`0^${sym}x`);
+      }
+
+      // ------------------------------------------------------
+      // a+x / a-x
+      // ------------------------------------------------------
+
+      if (isDense && token === 3 && (sym === "" || sym === "-")) {
+        let A;
+
+        if (isInt) {
+          A = gen_int(1);
+        } else {
+          const G = gen_size(1);
+          A = G.concat(G.map(a => -a));
+        }
+
+        for (const a of A) {
+          let good = true;
+
+          for (let i = 0; i < sx.length; i++) {
+            if (disp(a + sx[i]) !== xOut[i]) {
+              good = false;
+              break;
+            }
+          }
+
+          if (good) {
+            if (sym === "") {
+              finish(`${formatConstant(1, a)}+x`);
+            } else {
+              finish(`${formatConstant(1, a)}-x`);
+            }
+          }
+
+          reportProgress(token, sym);
+        }
       }
 
       // ------------------------------------------------------
@@ -607,6 +645,79 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
             } else {
               finish(`(${sym}x)^${repA}`);
             }
+          }
+
+          reportProgress(token, sym);
+        }
+      }
+
+      // ------------------------------------------------------
+      // x%a
+      // ------------------------------------------------------
+
+      tokenRange = token - symLen - 2;
+
+      if (1 <= tokenRange && tokenRange <= 2) {
+        const G = gen_size(tokenRange);
+        let A;
+
+        if (all(sx, x => x >= 0)) {
+          const sxMax = arrayMax(sx);
+          A = G.filter(a => 1 < a && a <= sxMax);
+        } else {
+          A = G.filter(a => 1 < a);
+        }
+
+        for (const a of A) {
+          let good = true;
+
+          for (let i = 0; i < sx.length; i++) {
+            if (disp(smod(sx[i], a)) !== xOut[i]) {
+              good = false;
+              break;
+            }
+          }
+
+          if (good) {
+            finish(`${sym}x%${formatConstant(tokenRange, a)}`);
+          }
+
+          reportProgress(token, sym);
+        }
+      }
+
+      // ------------------------------------------------------
+      // a%x
+      // ------------------------------------------------------
+
+      tokenRange = token - symLen - 2;
+
+      if (1 <= tokenRange && tokenRange <= 2) {
+        const G = gen_size(tokenRange);
+        const positiveA = G.filter(a => a > 1);
+        const A = positiveA.concat(positiveA.map(a => -a));
+
+        for (const a of A) {
+          let good = true;
+
+          for (let i = 0; i < sx.length; i++) {
+            if (disp(smod(a, sx[i])) !== xOut[i]) {
+              good = false;
+              break;
+            }
+          }
+
+          if (good) {
+            let repA;
+
+            if (Number.isInteger(a)) {
+              const sign = a < 0 ? "-" : "";
+              repA = `${sign}0x${Math.abs(a).toString(16)}p0`;
+            } else {
+              repA = formatConstant(tokenRange, a);
+            }
+
+            finish(`${repA}%${sym}x`);
           }
 
           reportProgress(token, sym);
@@ -1227,6 +1338,217 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
 
               reportProgress(token, sym);
             }
+          }
+        }
+      }
+
+      // ------------------------------------------------------
+      // f(x/a), f(x*a)
+      // ------------------------------------------------------
+
+      tokenRange = token - symLen - 4;
+      ok = 1 <= tokenRange && tokenRange <= 4;
+
+      if (quick) {
+        ok = ok && !isDense && zeroRatio >= 0.5;
+      }
+
+      if (ok) {
+        const A = gen_size(tokenRange);
+
+        for (const [symF, f] of FUNC_LIST) {
+          if (
+            (symF === "sin" || symF === "cos") &&
+            !xOut.every(y => y === 0 || y === 1)
+          ) {
+            continue;
+          }
+
+          for (const a of A) {
+            let repA = null;
+
+            for (const mode of [0, 1]) {
+              const vals = [];
+              let valid = true;
+              let innerOp;
+
+              if (mode === 0) {
+                for (const x of sx) {
+                  const v = f(sdiv(x, a));
+
+                  if (!Number.isFinite(v)) {
+                    valid = false;
+                    break;
+                  }
+
+                  vals.push(v);
+                }
+
+                innerOp = "/";
+              } else {
+                for (const x of sx) {
+                  const v = f(smul(x, a));
+
+                  if (!Number.isFinite(v)) {
+                    valid = false;
+                    break;
+                  }
+
+                  vals.push(v);
+                }
+
+                innerOp = "*";
+              }
+
+              if (!valid) {
+                continue;
+              }
+
+              let good = true;
+
+              for (let i = 0; i < vals.length; i++) {
+                if (disp(vals[i]) !== xOut[i]) {
+                  good = false;
+                  break;
+                }
+              }
+
+              if (good) {
+                if (repA === null) {
+                  repA = formatConstant(tokenRange, a);
+                }
+
+                finish(`${symF}(${sym}x${innerOp}${repA})`);
+              }
+
+              reportProgress(token, sym);
+            }
+          }
+        }
+      }
+
+      // ------------------------------------------------------
+      // f(x)*a, f(x)/a
+      // ------------------------------------------------------
+
+      tokenRange = token - 4;
+      ok = sym === "" && 1 <= tokenRange && tokenRange <= 4;
+
+      if (quick) {
+        ok = ok && !isDense && zeroRatio >= 0.5;
+      }
+
+      if (ok) {
+        const A = gen_size(tokenRange);
+
+        for (const [symF, f] of FUNC_LIST) {
+          const vals = [];
+          let valid = true;
+
+          for (const x of xIn) {
+            const v = f(x);
+
+            if (!Number.isFinite(v)) {
+              valid = false;
+              break;
+            }
+
+            vals.push(v);
+          }
+
+          if (!valid) {
+            continue;
+          }
+
+          const first = vals[coloredIdx[0]];
+
+          if (first === 0) {
+            continue;
+          }
+
+          const fPos = first > 0;
+
+          for (let k = 1; k < coloredIdx.length; k++) {
+            const value = vals[coloredIdx[k]];
+
+            if (value === 0 || (value > 0) !== fPos) {
+              valid = false;
+              break;
+            }
+          }
+
+          if (!valid) {
+            continue;
+          }
+
+          const useNegativeA = !fPos;
+          const absVals = coloredIdx.map(index => Math.abs(vals[index]));
+
+          const divLow = arrayMax(absVals) / LIMIT;
+          const divHigh = arrayMin(absVals);
+
+          let mulLow = -Infinity;
+          let mulHigh = Infinity;
+
+          for (const value of absVals) {
+            mulLow = Math.max(mulLow, 1 / value);
+            mulHigh = Math.min(mulHigh, LIMIT / value);
+          }
+
+          if (divLow > divHigh && mulLow > mulHigh) {
+            continue;
+          }
+
+          for (const a0 of A) {
+            const tryDiv = divLow <= a0 && a0 <= divHigh;
+            const tryMul = mulLow <= a0 && a0 <= mulHigh;
+
+            if (!tryDiv && !tryMul) {
+              continue;
+            }
+
+            const a = useNegativeA ? -a0 : a0;
+            let repA = null;
+
+            if (tryDiv) {
+              let good = true;
+
+              for (let i = 0; i < vals.length; i++) {
+                if (disp(sdiv(vals[i], a)) !== xOut[i]) {
+                  good = false;
+                  break;
+                }
+              }
+
+              if (good) {
+                if (repA === null) {
+                  repA = formatConstant(tokenRange, a);
+                }
+
+                finish(`${symF}(x)/${repA}`);
+              }
+            }
+
+            if (tryMul) {
+              let good = true;
+
+              for (let i = 0; i < vals.length; i++) {
+                if (disp(smul(vals[i], a)) !== xOut[i]) {
+                  good = false;
+                  break;
+                }
+              }
+
+              if (good) {
+                if (repA === null) {
+                  repA = formatConstant(tokenRange, a);
+                }
+
+                finish(`${symF}(x)*${repA}`);
+              }
+            }
+
+            reportProgress(token, sym);
           }
         }
       }
