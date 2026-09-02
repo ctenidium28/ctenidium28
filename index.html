@@ -40,53 +40,121 @@
       </div>
 
       <div class="controls">
-        <label class="field">
-          <span>Max token</span>
-          <input id="maxTokenInput" type="number" min="3" step="1" value="8">
-        </label>
-
-        <div class="scan-actions">
-          <div class="button-row">
-            <button id="runButton" type="button" class="primary">Run scan</button>
-            <button id="stopButton" type="button" class="stop" disabled>Stop</button>
-          </div>
-
-          <fieldset class="scan-mode">
-            <legend class="visually-hidden">Scan mode</legend>
-
-            <input
-              id="modeQuick"
-              type="radio"
-              name="scanMode"
-              value="quick"
-            >
-            <label
-              for="modeQuick"
-              title="Prioritizes speed by using stronger heuristic pruning."
-            >
-              Quick
-            </label>
-
-            <input
-              id="modeBroad"
-              type="radio"
-              name="scanMode"
-              value="broad"
-              checked
-            >
-            <label
-              for="modeBroad"
-              title="Prioritizes coverage by searching a broader candidate set."
-            >
-              Broad
-            </label>
-          </fieldset>
+        <div class="button-row">
+          <button id="runButton" type="button" class="primary">Run scan</button>
+          <button id="stopButton" type="button" class="stop" disabled>Stop</button>
         </div>
       </div>
 
-      <p class="control-note">
-        Quick prioritizes speed. Broad prioritizes search coverage.
-      </p>
+      <details class="advanced-options">
+        <summary>Advanced options</summary>
+
+        <div class="advanced-options-grid">
+          <label class="field">
+            Max Token
+            <span
+		      class="help-tip"
+		      tabindex="0"
+		      data-tooltip="Maximum token count to search. The scanner checks smaller token counts first and stops after the first token layer that produces a result. Larger values can greatly increase scan time."
+		    >?</span>
+            <input
+              id="maxTokenInput"
+              type="number"
+              min="3"
+              step="1"
+              value="8"
+            >
+          </label>
+
+          <div class="option-field">
+            Scan mode
+            <span
+		      class="help-tip"
+		      tabindex="0"
+		      data-tooltip="Quick uses a smaller literal set and stronger pruning to prioritize speed. Broad searches a wider candidate set and preserves more numeric distinctions."
+		    >?</span>
+
+            <fieldset class="scan-mode">
+              <legend class="visually-hidden">Scan mode</legend>
+
+              <input
+                id="modeQuick"
+                type="radio"
+                name="scanMode"
+                value="quick"
+              >
+              <label
+                for="modeQuick"
+                title="Prioritizes speed by using stronger heuristic pruning."
+              >
+                Quick
+              </label>
+
+              <input
+                id="modeBroad"
+                type="radio"
+                name="scanMode"
+                value="broad"
+                checked
+              >
+              <label
+                for="modeBroad"
+                title="Prioritizes coverage by searching a broader candidate set."
+              >
+                Broad
+              </label>
+            </fieldset>
+          </div>
+
+          <label class="field">
+            Max results
+            <span
+		      class="help-tip"
+		      tabindex="0"
+		      data-tooltip="Maximum number of expressions to return from the smallest successful token layer. Results are displayed immediately. If fewer results are found, the scanner finishes that token layer and then stops."
+		    >?</span>
+            <input
+              id="maxFoundInput"
+              type="number"
+              min="1"
+              step="1"
+              value="3"
+            >
+          </label>
+
+          <label class="field">
+            Decimal fraction digits
+            <span
+		      class="help-tip"
+		      tabindex="0"
+		      data-tooltip="Controls the maximum fractional depth used for generated decimal literals such as .0001. Larger values generate more candidates and can increase scan time and memory usage."
+		    >?</span>
+            <input
+              id="maxDecimalFractionDigitsInput"
+              type="number"
+              min="1"
+              step="1"
+              value="17"
+            >
+          </label>
+
+          <label class="field">
+            Hex fraction digits
+            <span
+		      class="help-tip"
+		      tabindex="0"
+		      data-tooltip="Controls the maximum number of hexadecimal fractional digits generated for hex literals. Larger values generate more candidates and can increase scan time and memory usage."
+		    >?</span>
+            <input
+              id="maxHexFractionDigitsInput"
+              type="number"
+              min="1"
+              step="1"
+              value="17"
+            >
+          </label>
+        </div>
+      </details>
     </section>
 
     <section class="panel">
@@ -113,10 +181,6 @@
         The "All Clear" button removes all input rows.
       </p>
       <p>
-        Quick mode uses stronger heuristic pruning to prioritize speed.<br>
-        Broad mode searches a wider candidate set, but neither mode is exhaustive.
-      </p>
-      <p>
         The Stop button immediately cancels the active scan. There is no resume function.
       </p>
       <p>
@@ -130,13 +194,19 @@
     <section class="panel notes">
       <h2>Update History</h2>
       <p>
+        September 2, 2026: Updated numeric literal generation and Lua numeric semantics.<br>
+        Added configurable maximum results and decimal/hex fraction digit limits.<br>
+        Moved scan settings into Advanced options and changed the scanner to display results immediately as they are found.<br>
+        Added <code>(a+x)^b</code> and <code>(a-x)^b</code> with additional pruning.
+      </p>
+      <p>
         August 22, 2026: Added <code>a+x</code>, <code>x%a</code>, <code>a%x</code>, <code>f(x/a)</code>, <code>f(x*a)</code>, <code>f(x)/a</code>, <code>f(x)*a</code>, where <code>f</code> is <code>sin</code>, <code>cos</code>, or <code>tan</code>.
       </p>
       <p>
         July 29, 2026: Added Quick/Broad scan modes and the "All Clear" button.<br>
         Moved the scan to a Web Worker so that the Stop button can immediately cancel heavy computation.<br>
         Added <code>x^a</code> and some bitwise expressions.<br>
-        Significantly improved scanning speed for <code>a^x%b</code> and <code>x/a%b</code>.<br>
+        Significantly improved scanning speed for <code>a^x%b</code> and <code>x/a%b</code>.
       </p>
       <p>
         July 9, 2026: Added <code>x/a</code>, <code>f(x/a)/b</code>, <code>f(x/a)*b</code>, <code>f(x*a)/b</code>, and <code>f(x*a)*b</code>, where <code>f</code> is <code>sin</code>, <code>cos</code>, or <code>tan</code>.<br>
