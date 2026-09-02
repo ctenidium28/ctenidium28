@@ -11,10 +11,16 @@ const allClearButton = document.getElementById("allClearButton");
 const runButton = document.getElementById("runButton");
 const stopButton = document.getElementById("stopButton");
 const maxTokenInput = document.getElementById("maxTokenInput");
+const maxFoundInput = document.getElementById("maxFoundInput");
+const maxDecimalFractionDigitsInput = document.getElementById("maxDecimalFractionDigitsInput");
+const maxHexFractionDigitsInput = document.getElementById("maxHexFractionDigitsInput");
 const resultOutput = document.getElementById("resultOutput");
 const copyResultButton = document.getElementById("copyResultButton");
 
 let activeWorker = null;
+let foundExpressions = [];
+let currentProgress = null;
+let notFound = false;
 
 // ------------------------------------------------------------
 // Input rows
@@ -110,21 +116,22 @@ function readPairs() {
   const xOut = [];
 
   for (const row of rows) {
-    const xiText = row.querySelector(".x-in-input").value;
-    const xoText = row.querySelector(".x-out-input").value;
+    const xiText = row.querySelector(".x-in-input").value.trim();
+    const xoText = row.querySelector(".x-out-input").value.trim();
 
-    const xi = Number(xiText);
-    const xo = Number(xoText);
-
-    if (!Number.isFinite(xi)) {
+    if (xiText === "" || !Number.isFinite(Number(xiText))) {
       throw new Error("x_in must contain finite numbers.");
     }
+
+    const xo = Number(xoText);
 
     if (!Number.isFinite(xo)) {
       throw new Error("x_out must contain finite numbers.");
     }
 
-    xIn.push(xi);
+    // x_inは表記を保持したままWorkerへ送る。
+    // これにより1と1.0などのLua subtypeを区別できる。
+    xIn.push(xiText);
     xOut.push(xo);
   }
 
@@ -132,12 +139,51 @@ function readPairs() {
 }
 
 function readQuickMode() {
-  const selected = document.querySelector(
-    'input[name="scanMode"]:checked',
-  );
-
-  // index.html更新前でもPython最新版の quick=false と一致させる。
+  const selected = document.querySelector('input[name="scanMode"]:checked');
   return selected !== null && selected.value === "quick";
+}
+
+function readOptions() {
+  const maxToken = Number(maxTokenInput.value);
+  const maxFound = Number(maxFoundInput.value);
+  const maxDecimalFractionDigits = Number(maxDecimalFractionDigitsInput.value);
+  const maxHexFractionDigits = Number(maxHexFractionDigitsInput.value);
+
+  if (!Number.isInteger(maxToken) || maxToken < 3) {
+    throw new Error(
+      "Max token must be an integer greater than or equal to 3.",
+    );
+  }
+
+  if (!Number.isInteger(maxFound) || maxFound < 1) {
+    throw new Error("Max results must be a positive integer.");
+  }
+
+  if (
+    !Number.isInteger(maxDecimalFractionDigits) ||
+    maxDecimalFractionDigits < 1
+  ) {
+    throw new Error(
+      "Decimal fraction digits must be a positive integer.",
+    );
+  }
+
+  if (
+    !Number.isInteger(maxHexFractionDigits) ||
+    maxHexFractionDigits < 1
+  ) {
+    throw new Error(
+      "Hex fraction digits must be a positive integer.",
+    );
+  }
+
+  return {
+    maxToken,
+    quick: readQuickMode(),
+    maxFound,
+    maxDecimalFractionDigits,
+    maxHexFractionDigits,
+  };
 }
 
 // ------------------------------------------------------------
@@ -148,6 +194,9 @@ function setScanningState(scanning) {
   runButton.disabled = scanning;
   addRowButton.disabled = scanning;
   maxTokenInput.disabled = scanning;
+  maxFoundInput.disabled = scanning;
+  maxDecimalFractionDigitsInput.disabled = scanning;
+  maxHexFractionDigitsInput.disabled = scanning;
 
   if (addNextRowButton) {
     addNextRowButton.disabled = scanning;
@@ -161,9 +210,7 @@ function setScanningState(scanning) {
     stopButton.disabled = !scanning;
   }
 
-  const modeInputs = document.querySelectorAll(
-    'input[name="scanMode"]',
-  );
+  const modeInputs = document.querySelectorAll('input[name="scanMode"]');
 
   for (const input of modeInputs) {
     input.disabled = scanning;
@@ -185,24 +232,54 @@ function formatProgressMessage(data) {
   }
 
   const symbol = data.symbol === "" ? "x" : data.symbol;
+
   return (
     `Scanning... ${tokenPart}, ` +
     `symbol="${symbol}", checks=${data.checks}`
   );
 }
 
+function renderOutput() {
+  if (foundExpressions.length > 0) {
+    const lines = foundExpressions.slice();
+
+    if (currentProgress !== null) {
+      lines.push("", currentProgress);
+    }
+
+    resultOutput.textContent = lines.join("\n");
+    return;
+  }
+
+  if (notFound) {
+    resultOutput.textContent = "Not Found";
+    return;
+  }
+
+  if (currentProgress !== null) {
+    resultOutput.textContent = currentProgress;
+    return;
+  }
+
+  resultOutput.textContent = "Ready.";
+}
+
 // ------------------------------------------------------------
 // Worker control
 // ------------------------------------------------------------
 
-function startScan(xIn, xOut, maxToken, quick) {
+function startScan(xIn, xOut, options) {
   disposeWorker();
 
   const worker = new Worker("./scan_worker.js");
   activeWorker = worker;
 
+  foundExpressions = [];
+  currentProgress = "Scanning...";
+  notFound = false;
+
   setScanningState(true);
-  resultOutput.textContent = "Scanning...";
+  renderOutput();
 
   worker.addEventListener("message", event => {
     if (activeWorker !== worker) {
@@ -212,25 +289,34 @@ function startScan(xIn, xOut, maxToken, quick) {
     const data = event.data || {};
 
     if (data.type === "progress") {
-      resultOutput.textContent = formatProgressMessage(data);
+      currentProgress = formatProgressMessage(data);
+      renderOutput();
       return;
     }
 
     if (data.type === "result") {
-      resultOutput.textContent = String(data.expression);
-      disposeWorker();
-      setScanningState(false);
+      foundExpressions.push(String(data.expression));
+      renderOutput();
       return;
     }
 
     if (data.type === "not-found") {
-      resultOutput.textContent = "Not Found";
+      notFound = true;
+      currentProgress = null;
+      renderOutput();
+      return;
+    }
+
+    if (data.type === "done") {
+      currentProgress = null;
+      renderOutput();
       disposeWorker();
       setScanningState(false);
       return;
     }
 
     if (data.type === "error") {
+      currentProgress = null;
       resultOutput.textContent = String(data.message || "Worker error.");
       disposeWorker();
       setScanningState(false);
@@ -243,6 +329,7 @@ function startScan(xIn, xOut, maxToken, quick) {
     }
 
     const message = event.message || "Worker error.";
+    currentProgress = null;
     resultOutput.textContent = String(message);
 
     disposeWorker();
@@ -254,8 +341,11 @@ function startScan(xIn, xOut, maxToken, quick) {
     payload: {
       xIn,
       xOut,
-      maxToken,
-      quick,
+      maxToken: options.maxToken,
+      quick: options.quick,
+      maxFound: options.maxFound,
+      maxDecimalFractionDigits: options.maxDecimalFractionDigits,
+      maxHexFractionDigits: options.maxHexFractionDigits,
     },
   });
 }
@@ -283,7 +373,15 @@ if (stopButton) {
     }
 
     disposeWorker();
-    resultOutput.textContent = "Stopped.";
+    currentProgress = null;
+
+    if (foundExpressions.length > 0) {
+      resultOutput.textContent =
+        foundExpressions.join("\n") + "\n\nStopped.";
+    } else {
+      resultOutput.textContent = "Stopped.";
+    }
+
     setScanningState(false);
   });
 }
@@ -312,16 +410,8 @@ if (copyResultButton) {
 runButton.addEventListener("click", () => {
   try {
     const { xIn, xOut } = readPairs();
-    const maxToken = Number(maxTokenInput.value);
-
-    if (!Number.isInteger(maxToken) || maxToken < 3) {
-      throw new Error(
-        "Max token must be an integer greater than or equal to 3.",
-      );
-    }
-
-    const quick = readQuickMode();
-    startScan(xIn, xOut, maxToken, quick);
+    const options = readOptions();
+    startScan(xIn, xOut, options);
   } catch (error) {
     resultOutput.textContent =
       error && error.stack
