@@ -4,484 +4,949 @@
 // Parameters
 // ------------------------------------------------------------
 
-const R_MAX = 17;
 const MAX_SCAN_SIZE = 4;
 
-
-// ------------------------------------------------------------
-// Precomputed constants
-// ------------------------------------------------------------
-
-const TEN_POW_BIG = Array.from(
-  { length: R_MAX },
-  (_, r) => 10n ** BigInt(r)
-);
-
-const HEX_POW = Array.from(
-  { length: R_MAX },
-  (_, r) => 16 ** r
-);
-
-const HEX_SCALES = Array.from(
-  { length: R_MAX },
-  (_, r) => 16 ** (-r)
-);
-
-// Python:
-// POW10_SHIFT = tuple(Decimal(10) ** r for r in range(1 - r_max, r_max))
-const POW10_SHIFT = Array.from(
-  { length: 2 * R_MAX - 1 },
-  (_, i) => 1 - R_MAX + i
-);
-
-// Python:
-// POW2_SHIFT = tuple(Decimal(2) ** r for r in range(1 - r_max, 0))
-const POW2_SHIFT = Array.from(
-  { length: R_MAX - 1 },
-  (_, i) => 1 - R_MAX + i
-);
+let MAX_DECIMAL_FRACTION_DIGITS = 17;
+let MAX_HEX_FRACTION_DIGITS = 17;
 
 
 // ------------------------------------------------------------
-// Basic utilities
+// Token cost
 // ------------------------------------------------------------
 
 function is_2pow(n) {
-  return n === 0 || (n > 0 && (n & (n - 1)) === 0);
+  return Number.isInteger(n) && n > 0 && (n & (n - 1)) === 0;
 }
 
+
 function bitLength(n) {
-  if (n <= 0) return 0;
+  if (n <= 0) {
+    return 0;
+  }
   return Math.floor(Math.log2(n)) + 1;
 }
+
 
 function size2int(size) {
   return size > 0 ? (2 ** (4 * bitLength(size))) + 1 : 1;
 }
 
-function getCached(cache, key, build) {
-  if (cache.has(key)) {
-    return cache.get(key);
+
+const INT_TOKEN_SIZE_CACHE = new Map();
+
+function intTokenSize(n) {
+  n = typeof n === "bigint" ? n : BigInt(n);
+  if (n < 0n) {
+    n = -n;
   }
 
-  const value = build();
-  cache.set(key, value);
-  return value;
+  const key = n.toString();
+  const cached = INT_TOKEN_SIZE_CACHE.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  let size = 1;
+
+  while (n >= BigInt(size2int(size))) {
+    size *= 2;
+  }
+
+  INT_TOKEN_SIZE_CACHE.set(key, size);
+  return size;
 }
 
 
-// ------------------------------------------------------------
-// Decimal-like representation
-//
-// Python 側では Decimal 計算をしてから float 化する。
-// JS 側でも、decimal 系の値はすぐ Number にせず、
-//   coeff * 10^exp
-// の形で保持し、最後に Number(`${coeff}e${exp}`) で丸める。
-// ------------------------------------------------------------
+const COMPONENT_VALUES_CACHE = new Map();
 
-function roundCoeffToPrecision(coeff, exp) {
-  // Python の Decimal context precision = 17 に寄せる。
-  // 正数のみを扱う。
-  let s = coeff.toString();
-
-  if (s.length <= R_MAX) {
-    return { coeff, exp };
+function componentValues(size) {
+  if (COMPONENT_VALUES_CACHE.has(size)) {
+    return COMPONENT_VALUES_CACHE.get(size);
   }
 
-  const cut = s.length - R_MAX;
-  const headStr = s.slice(0, R_MAX);
-  const tailStr = s.slice(R_MAX);
+  if (!is_2pow(size)) {
+    const out = Object.freeze([]);
+    COMPONENT_VALUES_CACHE.set(size, out);
+    return out;
+  }
 
-  let head = BigInt(headStr);
+  const upper = size2int(size);
+  const lower = size === 1 ? 0 : size2int(size / 2);
+  const out = [];
 
-  const first = tailStr.charCodeAt(0) - 48;
-  let restNonZero = false;
+  for (let n = lower; n < upper; n++) {
+    out.push(n);
+  }
 
-  for (let i = 1; i < tailStr.length; i++) {
-    if (tailStr.charCodeAt(i) !== 48) {
-      restNonZero = true;
-      break;
+  Object.freeze(out);
+  COMPONENT_VALUES_CACHE.set(size, out);
+  return out;
+}
+
+
+function decimalComponentCost(digits, emptyCost) {
+  if (digits === "") {
+    return emptyCost;
+  }
+  return intTokenSize(BigInt(digits));
+}
+
+
+function hexComponentValue(digits) {
+  return digits === "" ? 0n : BigInt(`0x${digits}`);
+}
+
+
+function hexComponentCost(digits) {
+  return intTokenSize(hexComponentValue(digits));
+}
+
+
+function literalTokenSize(text) {
+  let s = String(text).trim();
+
+  if (SPECIAL_CONSTANT_MAP.has(s)) {
+    return 1;
+  }
+
+  if (s.startsWith("+") || s.startsWith("-")) {
+    s = s.slice(1);
+  }
+
+  const lower = s.toLowerCase();
+
+  if (lower.startsWith("0x")) {
+    let body = s.slice(2);
+    const lowerBody = body.toLowerCase();
+    const pPos = lowerBody.indexOf("p");
+
+    let exponent = null;
+    let explicitPlus = false;
+
+    if (pPos !== -1) {
+      let expText = body.slice(pPos + 1);
+      body = body.slice(0, pPos);
+
+      if (expText.startsWith("+")) {
+        explicitPlus = true;
+        expText = expText.slice(1);
+      }
+
+      exponent = Number(expText);
     }
-  }
 
-  // Decimal の既定丸め ROUND_HALF_EVEN に寄せる。
-  const shouldRoundUp =
-    first > 5 ||
-    (first === 5 && (restNonZero || (head & 1n) === 1n));
+    let cost;
 
-  if (shouldRoundUp) {
-    head += 1n;
-  }
+    if (body.includes(".")) {
+      const [left, right] = body.split(".", 2);
+      const leftCost = hexComponentCost(left);
+      const rightValue = hexComponentValue(right);
+      const rightCost = intTokenSize(rightValue);
 
-  exp += cut;
+      if (exponent === null) {
+        cost = leftCost + rightCost;
+      } else if (exponent < 0) {
+        cost =
+          leftCost +
+          rightCost +
+          1 +
+          intTokenSize(-exponent);
+      } else {
+        cost =
+          leftCost +
+          intTokenSize(rightValue << BigInt(exponent));
+      }
+    } else {
+      const value = hexComponentValue(body);
+      const baseCost = intTokenSize(value);
 
-  // 999... の繰り上がりで桁数が増えた場合
-  if (head.toString().length > R_MAX) {
-    head /= 10n;
-    exp += 1;
-  }
-
-  return { coeff: head, exp };
-}
-
-function normalizeDec(coeff, exp) {
-  if (coeff === 0n) {
-    return null;
-  }
-
-  if (coeff < 0n) {
-    throw new Error("normalizeDec expects positive coeff");
-  }
-
-  ({ coeff, exp } = roundCoeffToPrecision(coeff, exp));
-
-  while (coeff % 10n === 0n) {
-    coeff /= 10n;
-    exp += 1;
-  }
-
-  return {
-    coeff,
-    exp,
-    key: `${coeff.toString()}e${exp}`
-  };
-}
-
-function addDec(map, coeff, exp) {
-  const v = normalizeDec(coeff, exp);
-
-  if (v !== null && !map.has(v.key)) {
-    map.set(v.key, v);
-  }
-}
-
-function decToNumber(v, shift = 0) {
-  // ここが重要。
-  // Number 演算で x * 10**r を作らず、
-  // Decimal の指数をずらした後に Number 化する。
-  return Number(`${v.coeff.toString()}e${v.exp + shift}`);
-}
-
-
-// ------------------------------------------------------------
-// Pair generation
-// ------------------------------------------------------------
-
-const DEC_PAIRS_CACHE = new Map();
-const HEX_PAIRS_CACHE = new Map();
-
-function decPairs(size) {
-  return getCached(DEC_PAIRS_CACHE, size, () => {
-    if (size < 0) return [];
-
-    const out = [];
-
-    for (let a = 0; a <= size; a++) {
-      const b = size - a;
-
-      if (is_2pow(a) && is_2pow(b)) {
-        out.push([a, b]);
+      if (exponent === null) {
+        cost = baseCost;
+      } else if (exponent < 0) {
+        cost =
+          baseCost +
+          1 +
+          intTokenSize(-exponent);
+      } else {
+        cost = intTokenSize(value << BigInt(exponent));
       }
     }
 
-    return out;
-  });
+    if (explicitPlus) {
+      cost += 2;
+    }
+
+    return cost;
+  }
+
+  const ePos = lower.indexOf("e");
+  let exponent = null;
+  let explicitPlus = false;
+
+  if (ePos !== -1) {
+    let expText = s.slice(ePos + 1);
+    s = s.slice(0, ePos);
+
+    if (expText.startsWith("+")) {
+      explicitPlus = true;
+      expText = expText.slice(1);
+    }
+
+    exponent = Number(expText);
+  }
+
+  let cost;
+
+  if (s.includes(".")) {
+    const [left, right] = s.split(".", 2);
+    cost =
+      decimalComponentCost(left, 0) +
+      decimalComponentCost(right, 1);
+  } else {
+    cost = intTokenSize(BigInt(s));
+  }
+
+  if (exponent !== null) {
+    cost += intTokenSize(Math.abs(exponent));
+
+    if (explicitPlus) {
+      cost += 2;
+    }
+  }
+
+  return cost;
 }
 
-function hexPairs(size) {
-  return getCached(HEX_PAIRS_CACHE, size, () => {
-    if (size < 0) return [];
 
-    const out = [];
+// ------------------------------------------------------------
+// Semantic identity
+// ------------------------------------------------------------
 
-    for (let a = 1; a < size; a++) {
-      const b = size - a;
+const FLOAT_KEY_BUFFER = new ArrayBuffer(8);
+const FLOAT_KEY_VIEW = new DataView(FLOAT_KEY_BUFFER);
 
-      if (is_2pow(a) && is_2pow(b)) {
-        out.push([a, b]);
+function valueKey(value) {
+  if (typeof value === "bigint") {
+    return `int:${value.toString()}`;
+  }
+
+  if (typeof value === "number") {
+    FLOAT_KEY_VIEW.setFloat64(0, value, false);
+    const hi = FLOAT_KEY_VIEW.getUint32(0, false).toString(16).padStart(8, "0");
+    const lo = FLOAT_KEY_VIEW.getUint32(4, false).toString(16).padStart(8, "0");
+    return `float:${hi}${lo}`;
+  }
+
+  throw new TypeError(`unsupported literal value: ${String(value)}`);
+}
+
+
+function betterText(newText, oldText) {
+  return (
+    newText.length < oldText.length ||
+    (newText.length === oldText.length && newText < oldText)
+  );
+}
+
+
+function addCandidate(out, text, tokenSize) {
+  if (literalTokenSize(text) !== tokenSize) {
+    throw new Error(`token mismatch: ${text}`);
+  }
+
+  let value;
+
+  try {
+    value = luaLiteralValue(text);
+  } catch {
+    return;
+  }
+
+  if (typeof value !== "bigint" && typeof value !== "number") {
+    return;
+  }
+
+  const key = valueKey(value);
+  const old = out.get(key);
+
+  if (old === undefined || betterText(text, old[0])) {
+    out.set(key, [text, value]);
+  }
+}
+
+
+function addSigned(out, text, tokenSize) {
+  addCandidate(out, text, tokenSize);
+  addCandidate(out, `-${text}`, tokenSize);
+}
+
+
+// ------------------------------------------------------------
+// Decimal fixed notation
+// ------------------------------------------------------------
+
+const DECIMAL_UNSIGNED_MANTISSAS_CACHE = new Map();
+
+function decimalUnsignedMantissas(tokenSize) {
+  if (DECIMAL_UNSIGNED_MANTISSAS_CACHE.has(tokenSize)) {
+    return DECIMAL_UNSIGNED_MANTISSAS_CACHE.get(tokenSize);
+  }
+
+  const out = new Set();
+
+  for (const n of componentValues(tokenSize)) {
+    out.add(String(n));
+  }
+
+  for (const q of componentValues(tokenSize)) {
+    if (q === 0) {
+      if (tokenSize === 1) {
+        out.add(".0");
+      }
+      continue;
+    }
+
+    if (q % 10 === 0) {
+      continue;
+    }
+
+    const digits = String(q);
+    let z = 0;
+
+    while (z + digits.length <= MAX_DECIMAL_FRACTION_DIGITS) {
+      const text = "." + "0".repeat(z) + digits;
+      const value = Number(text);
+
+      if (value === 0) {
+        break;
+      }
+
+      out.add(text);
+      z++;
+    }
+  }
+
+  for (let leftSize = 1; leftSize < tokenSize; leftSize++) {
+    const rightSize = tokenSize - leftSize;
+
+    if (!is_2pow(leftSize) || !is_2pow(rightSize)) {
+      continue;
+    }
+
+    for (const p of componentValues(leftSize)) {
+      if (p === 0) {
+        continue;
+      }
+
+      for (const q of componentValues(rightSize)) {
+        if (q === 0 || q % 10 === 0) {
+          continue;
+        }
+
+        const digits = String(q);
+        const base = Number(p);
+        let z = 0;
+
+        while (true) {
+          const text = `${p}.` + "0".repeat(z) + digits;
+          const value = Number(text);
+
+          if (value === base) {
+            break;
+          }
+
+          out.add(text);
+          z++;
+        }
       }
     }
+  }
 
-    if (size >= 1 && is_2pow(size - 1)) {
-      out.push([0, size - 1]);
-    }
+  const result = Array.from(out);
+  result.sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0));
+  Object.freeze(result);
+  DECIMAL_UNSIGNED_MANTISSAS_CACHE.set(tokenSize, result);
+  return result;
+}
 
-    return out;
-  });
+
+function generateDecimalFixed(out, tokenSize) {
+  for (const text of decimalUnsignedMantissas(tokenSize)) {
+    addSigned(out, text, tokenSize);
+  }
 }
 
 
 // ------------------------------------------------------------
-// Decimal positive candidates
-//
-// Python:
-//   Decimal(num) * Decimal(10) ** (-r)
-//
-// JS:
-//   num * 10^(-r) を Number で作らず、
-//   { coeff: num, exp: -r } として保持する。
+// Decimal exponent notation
 // ------------------------------------------------------------
 
-const GEN_SIZE_DEC_POSITIVE_CACHE = new Map();
+function generateDecimalExponent(out, tokenSize) {
+  for (let exponentSize = 1; exponentSize < tokenSize; exponentSize++) {
+    const mantissaSize = tokenSize - exponentSize;
 
-function genSizeDecPositiveCached(size) {
-  return getCached(GEN_SIZE_DEC_POSITIVE_CACHE, size, () => {
-    if (size < 0) {
-      return [];
+    if (!is_2pow(exponentSize)) {
+      continue;
     }
 
-    const seen = new Map();
+    const mantissas = decimalUnsignedMantissas(mantissaSize);
 
-    for (const [leftSize, rightSize] of decPairs(size)) {
-      const P = size2int(leftSize);
-      const Q = size2int(rightSize);
+    for (const exponent of componentValues(exponentSize)) {
+      const exponentTexts =
+        exponent === 0
+          ? ["0"]
+          : [String(exponent), `-${exponent}`];
 
-      for (let r = 0; r < R_MAX; r++) {
-        const stepBig = TEN_POW_BIG[r];
+      for (const mantissa of mantissas) {
+        if (Number(mantissa) === 0) {
+          continue;
+        }
 
-        for (let p = 0; p < P; p++) {
-          const bound = BigInt(P - p) * stepBig;
-          const qLim = bound < BigInt(Q) ? Number(bound) : Q;
-          const base = BigInt(p) * stepBig;
+        for (const expText of exponentTexts) {
+          const text = `${mantissa}e${expText}`;
+          addSigned(out, text, tokenSize);
+        }
+      }
+    }
+  }
+}
 
-          for (let q = 0; q < qLim; q++) {
-            const num = base + BigInt(q);
 
-            if (num !== 0n) {
-              addDec(seen, num, -r);
+// ------------------------------------------------------------
+// Hex integer / fixed notation
+// ------------------------------------------------------------
+
+function generateHexInteger(out, tokenSize) {
+  for (const n of componentValues(tokenSize)) {
+    addSigned(out, `0x${n.toString(16).toUpperCase()}`, tokenSize);
+  }
+}
+
+
+function* iterHexFractionTexts(q) {
+  if (q === 0) {
+    yield "0";
+    return;
+  }
+
+  if (q % 16 === 0) {
+    return;
+  }
+
+  const digits = q.toString(16).toUpperCase();
+  let z = 0;
+
+  while (true) {
+    yield "0".repeat(z) + digits;
+    z++;
+  }
+}
+
+
+function generateHexFixed(out, tokenSize) {
+  const rightSize = tokenSize - 1;
+
+  if (is_2pow(rightSize)) {
+    for (const q of componentValues(rightSize)) {
+      if (q === 0) {
+        continue;
+      }
+
+      for (const frac of iterHexFractionTexts(q)) {
+        if (frac.length > MAX_HEX_FRACTION_DIGITS) {
+          break;
+        }
+
+        const text = `0x.${frac}`;
+        let value;
+
+        try {
+          value = luaLiteralValue(text);
+        } catch {
+          break;
+        }
+
+        if (value === 0) {
+          break;
+        }
+
+        addSigned(out, text, tokenSize);
+      }
+    }
+  }
+
+  for (let leftSize = 1; leftSize < tokenSize; leftSize++) {
+    const rightSize2 = tokenSize - leftSize;
+
+    if (!is_2pow(leftSize) || !is_2pow(rightSize2)) {
+      continue;
+    }
+
+    for (const p of componentValues(leftSize)) {
+      if (p === 0) {
+        continue;
+      }
+
+      const left = p.toString(16).toUpperCase();
+      const base = Number(p);
+
+      for (const q of componentValues(rightSize2)) {
+        if (q === 0) {
+          continue;
+        }
+
+        for (const frac of iterHexFractionTexts(q)) {
+          if (frac.length > MAX_HEX_FRACTION_DIGITS) {
+            break;
+          }
+
+          const text = `0x${left}.${frac}`;
+          let value;
+
+          try {
+            value = luaLiteralValue(text);
+          } catch {
+            break;
+          }
+
+          if (value === base) {
+            break;
+          }
+
+          addSigned(out, text, tokenSize);
+        }
+      }
+    }
+  }
+}
+
+
+// ------------------------------------------------------------
+// Hex p notation without decimal point
+// ------------------------------------------------------------
+
+function generateHexPNoDot(out, tokenSize) {
+  const upper = size2int(tokenSize);
+
+  for (let n = 0; n < upper; n++) {
+    if (n === 0) {
+      if (tokenSize === 1) {
+        addSigned(out, "0x0p0", tokenSize);
+      }
+      continue;
+    }
+
+    let exponent = 0;
+
+    while (true) {
+      const shifted = BigInt(n) << BigInt(exponent);
+      const cost = intTokenSize(shifted);
+
+      if (cost > tokenSize) {
+        break;
+      }
+
+      if (cost === tokenSize) {
+        const text = `0x${n.toString(16).toUpperCase()}p${exponent}`;
+        addSigned(out, text, tokenSize);
+      }
+
+      exponent++;
+    }
+  }
+
+  for (let bodySize = 1; bodySize < tokenSize - 1; bodySize++) {
+    const exponentSize = tokenSize - bodySize - 1;
+
+    if (!is_2pow(bodySize) || !is_2pow(exponentSize)) {
+      continue;
+    }
+
+    for (const n of componentValues(bodySize)) {
+      for (const exponent of componentValues(exponentSize)) {
+        if (exponent === 0) {
+          continue;
+        }
+
+        const text =
+          `0x${n.toString(16).toUpperCase()}p-${exponent}`;
+        addSigned(out, text, tokenSize);
+      }
+    }
+  }
+}
+
+
+// ------------------------------------------------------------
+// Hex dotted p notation: p >= 0
+// ------------------------------------------------------------
+
+function generateHexPDotNonnegative(out, tokenSize) {
+  for (let leftSize = 1; leftSize < tokenSize; leftSize++) {
+    const shiftedRightSize = tokenSize - leftSize;
+
+    if (!is_2pow(leftSize) || !is_2pow(shiftedRightSize)) {
+      continue;
+    }
+
+    for (const leftValue of componentValues(leftSize)) {
+      const left =
+        leftValue === 0
+          ? ""
+          : leftValue.toString(16).toUpperCase();
+
+      if (shiftedRightSize === 1 && leftValue !== 0) {
+        let exponent = 1;
+
+        while (true) {
+          const text = `0x${left}.p${exponent}`;
+          let value;
+
+          try {
+            value = luaLiteralValue(text);
+          } catch {
+            break;
+          }
+
+          if (!Number.isFinite(value)) {
+            break;
+          }
+
+          addSigned(out, text, tokenSize);
+          exponent++;
+        }
+      }
+
+      const rightUpper = size2int(shiftedRightSize);
+
+      for (let q = 1; q < rightUpper; q++) {
+        if (q % 16 === 0) {
+          continue;
+        }
+
+        let exponent = 0;
+
+        while (true) {
+          const shifted = BigInt(q) << BigInt(exponent);
+          const cost = intTokenSize(shifted);
+
+          if (cost > shiftedRightSize) {
+            break;
+          }
+
+          if (cost === shiftedRightSize) {
+            const base = Number(leftValue) * (2 ** exponent);
+
+            for (const frac of iterHexFractionTexts(q)) {
+              if (frac.length > MAX_HEX_FRACTION_DIGITS) {
+                break;
+              }
+
+              const text = `0x${left}.${frac}p${exponent}`;
+              let value;
+
+              try {
+                value = luaLiteralValue(text);
+              } catch {
+                break;
+              }
+
+              if (!Number.isFinite(value)) {
+                break;
+              }
+
+              if (value === base) {
+                break;
+              }
+
+              addSigned(out, text, tokenSize);
+            }
+          }
+
+          exponent++;
+        }
+      }
+    }
+  }
+}
+
+
+// ------------------------------------------------------------
+// Hex dotted p notation: p < 0
+// ------------------------------------------------------------
+
+function generateHexPDotNegative(out, tokenSize) {
+  for (let leftSize = 1; leftSize < tokenSize; leftSize++) {
+    for (
+      let rightSize = 1;
+      rightSize < tokenSize - leftSize;
+      rightSize++
+    ) {
+      const exponentSize =
+        tokenSize - leftSize - rightSize - 1;
+
+      if (exponentSize < 1) {
+        continue;
+      }
+
+      if (
+        !is_2pow(leftSize) ||
+        !is_2pow(rightSize) ||
+        !is_2pow(exponentSize)
+      ) {
+        continue;
+      }
+
+      for (const leftValue of componentValues(leftSize)) {
+        const left =
+          leftValue === 0
+            ? ""
+            : leftValue.toString(16).toUpperCase();
+
+        for (const q of componentValues(rightSize)) {
+          for (const exponent of componentValues(exponentSize)) {
+            if (exponent === 0) {
+              continue;
+            }
+
+            const base =
+              Number(leftValue) * (2 ** (-exponent));
+            const fracTexts =
+              q === 0
+                ? ["0"]
+                : iterHexFractionTexts(q);
+
+            for (const frac of fracTexts) {
+              if (frac.length > MAX_HEX_FRACTION_DIGITS) {
+                break;
+              }
+
+              const text =
+                `0x${left}.${frac}p-${exponent}`;
+              let value;
+
+              try {
+                value = luaLiteralValue(text);
+              } catch {
+                break;
+              }
+
+              if (!Number.isFinite(value)) {
+                break;
+              }
+
+              if (value === base) {
+                break;
+              }
+
+              addSigned(out, text, tokenSize);
             }
           }
         }
       }
     }
-
-    return Array.from(seen.values());
-  });
+  }
 }
 
 
 // ------------------------------------------------------------
-// Hex positive candidates
-//
-// 16進系は 2 の冪分母なので、Number 直接生成でも
-// decimal shift 問題のような 10進シフト誤差は起こりにくい。
-// ここは速度優先で従来通り Number 生成にする。
+// Special constants
 // ------------------------------------------------------------
 
-const GEN_SIZE_HEX_POSITIVE_CACHE = new Map();
+function generateSpecialConstants(out, tokenSize) {
+  if (tokenSize !== 1) {
+    return;
+  }
 
-function genSizeHexPositiveCached(size) {
-  return getCached(GEN_SIZE_HEX_POSITIVE_CACHE, size, () => {
-    if (size < 0) {
-      return new Set();
-    }
-
-    const out = new Set();
-
-    for (const [leftSize, rightSize] of hexPairs(size)) {
-      const P = size2int(leftSize);
-      const Q = size2int(rightSize);
-
-      for (let r = 0; r < R_MAX; r++) {
-        const step = HEX_POW[r];
-        const scale = HEX_SCALES[r];
-
-        for (let p = 0; p < P; p++) {
-          const qLim = Math.min(Q, (P - p) * step);
-
-          for (let q = 0; q < qLim; q++) {
-            if (p !== 0 || q !== 0) {
-              out.add(p + q * scale);
-            }
-          }
-        }
-      }
-    }
-
-    return out;
-  });
+  for (const [text] of SPECIAL_CONSTANTS) {
+    addCandidate(out, text, 1);
+  }
 }
 
 
 // ------------------------------------------------------------
-// Positive cumulative gen_size
-//
-// 旧 gen_size(size) から正数だけを取り出した累積集合。
-// public には出さず、shell 計算用に使う。
+// Raw candidates
 // ------------------------------------------------------------
 
-const GEN_SIZE_POSITIVE_CUMULATIVE_CACHE = new Map();
+const RAW_CANDIDATES_CACHE = new Map();
 
-function genSizePositiveCumulativeCached(size) {
-  return getCached(GEN_SIZE_POSITIVE_CUMULATIVE_CACHE, size, () => {
-    if (size < 0) {
-      return new Set();
-    }
+function rawCandidates(tokenSize) {
+  if (RAW_CANDIDATES_CACHE.has(tokenSize)) {
+    return RAW_CANDIDATES_CACHE.get(tokenSize);
+  }
 
-    const out = new Set();
+  const out = new Map();
 
-    // decimal body
-    for (const x of genSizeDecPositiveCached(size)) {
-      const y = decToNumber(x);
-      if (y !== 0) out.add(y);
-    }
+  generateDecimalFixed(out, tokenSize);
+  generateDecimalExponent(out, tokenSize);
+  generateHexInteger(out, tokenSize);
+  generateHexFixed(out, tokenSize);
+  generateHexPNoDot(out, tokenSize);
+  generateHexPDotNonnegative(out, tokenSize);
+  generateHexPDotNegative(out, tokenSize);
+  generateSpecialConstants(out, tokenSize);
 
-    // decimal shifted
-    if (size - 1 >= 0) {
-      for (const x of genSizeDecPositiveCached(size - 1)) {
-        for (const shift of POW10_SHIFT) {
-          const y = decToNumber(x, shift);
-          if (y !== 0) out.add(y);
-        }
-      }
-    }
-
-    // hex body
-    for (const x of genSizeHexPositiveCached(size)) {
-      if (x !== 0) out.add(x);
-    }
-
-    // hex shifted
-    if (size - 2 >= 0) {
-      for (const x of genSizeHexPositiveCached(size - 2)) {
-        for (const shift of POW2_SHIFT) {
-          const y = x * (2 ** shift);
-          if (y !== 0) out.add(y);
-        }
-      }
-    }
-
-    // pi
-    if (size >= 1) {
-      out.add(Math.PI);
-    }
-
-    out.delete(0);
-    out.delete(-0);
-
-    return out;
-  });
+  RAW_CANDIDATES_CACHE.set(tokenSize, out);
+  return out;
 }
 
 
 // ------------------------------------------------------------
 // Public gen_size
-//
-// この gen_size(size) は、scan 用の正数 shell。
-// 旧 positive_shell(size) 相当。
 // ------------------------------------------------------------
 
-const GEN_SIZE_POSITIVE_SHELL_CACHE = new Map();
+const GEN_SIZE_CACHE = new Map();
 
-function genSizePositiveShellCached(size) {
-  return getCached(GEN_SIZE_POSITIVE_SHELL_CACHE, size, () => {
-    if (size < 1) {
-      return [];
+function genSizeCached(tokenSize) {
+  if (GEN_SIZE_CACHE.has(tokenSize)) {
+    return GEN_SIZE_CACHE.get(tokenSize);
+  }
+
+  if (tokenSize < 1) {
+    return [];
+  }
+
+  if (tokenSize > MAX_SCAN_SIZE) {
+    throw new RangeError(
+      `gen_size only supports sizes 1..${MAX_SCAN_SIZE}; got ${tokenSize}`
+    );
+  }
+
+  const cur = new Map(rawCandidates(tokenSize));
+
+  for (let smaller = 1; smaller < tokenSize; smaller++) {
+    for (const [, value] of genSizeCached(smaller)) {
+      cur.delete(valueKey(value));
     }
+  }
 
-    if (size > MAX_SCAN_SIZE) {
-      throw new RangeError(
-        `optimized gen_size only supports sizes 1..${MAX_SCAN_SIZE}; got ${size}`
-      );
-    }
+  const out = Array.from(cur.values());
+  out.sort((a, b) =>
+    a[0].length - b[0].length ||
+    (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
+  );
 
-    const cur = genSizePositiveCumulativeCached(size);
-    const prev = genSizePositiveCumulativeCached(size - 1);
-
-    const out = [];
-
-    for (const a of cur) {
-      if (!prev.has(a)) {
-        out.push(a);
-      }
-    }
-
-    return out;
-  });
+  Object.freeze(out);
+  GEN_SIZE_CACHE.set(tokenSize, out);
+  return out;
 }
 
-function gen_size(size) {
-  return genSizePositiveShellCached(size);
+
+function gen_size(tokenSize) {
+  return genSizeCached(tokenSize);
 }
 
 
 // ------------------------------------------------------------
-// Exact integer shell
-//
-// Python の gen_int(token_size) と同じく、
-// 「ちょうど tokenSize tokens」の符号付き整数だけを返す。
-//
-// 有効な tokenSize:
-//   1, 2, 4, 8, ...
-//
-// 例:
-//   gen_int(1): -16 ... 16
-//   gen_int(2): -256 ... -17, 17 ... 256
-//   gen_int(4): -4096 ... -257, 257 ... 4096
-//
-// 1e3 のような指数表記によって短く表現できる整数は生成しない。
+// Integer-only shell
 // ------------------------------------------------------------
 
 const GEN_INT_CACHE = new Map();
 
-function genIntCached(tokenSize) {
-  return getCached(GEN_INT_CACHE, tokenSize, () => {
-    if (
-      !Number.isInteger(tokenSize) ||
-      tokenSize < 1 ||
-      !is_2pow(tokenSize)
-    ) {
-      return Object.freeze([]);
+function gen_int(tokenSize) {
+  if (GEN_INT_CACHE.has(tokenSize)) {
+    return GEN_INT_CACHE.get(tokenSize);
+  }
+
+  if (!is_2pow(tokenSize)) {
+    const out = Object.freeze([]);
+    GEN_INT_CACHE.set(tokenSize, out);
+    return out;
+  }
+
+  const upper = size2int(tokenSize);
+  const out = [];
+
+  if (tokenSize === 1) {
+    for (let x = 1 - upper; x < upper; x++) {
+      out.push(BigInt(x));
     }
-
-    const upper = size2int(tokenSize);
-    const out = [];
-
-    if (tokenSize === 1) {
-      for (let x = 1 - upper; x < upper; x++) {
-        out.push(x);
-      }
-
-      return Object.freeze(out);
-    }
-
+  } else {
     const lower = size2int(tokenSize / 2);
 
-    // 負側:
-    //   1-upper <= x < 1-lower
-    //
-    // 例: tokenSize=2
-    //   -256 ... -17
     for (let x = 1 - upper; x < 1 - lower; x++) {
-      out.push(x);
+      out.push(BigInt(x));
     }
 
-    // 正側:
-    //   lower <= x < upper
-    //
-    // 例: tokenSize=2
-    //   17 ... 256
     for (let x = lower; x < upper; x++) {
-      out.push(x);
+      out.push(BigInt(x));
     }
+  }
 
-    return Object.freeze(out);
-  });
+  Object.freeze(out);
+  GEN_INT_CACHE.set(tokenSize, out);
+  return out;
 }
 
-function gen_int(tokenSize) {
-  return genIntCached(tokenSize);
+
+// ------------------------------------------------------------
+// Configuration / cache
+// ------------------------------------------------------------
+
+function clearGenSizeCaches() {
+  INT_TOKEN_SIZE_CACHE.clear();
+  COMPONENT_VALUES_CACHE.clear();
+  DECIMAL_UNSIGNED_MANTISSAS_CACHE.clear();
+  RAW_CANDIDATES_CACHE.clear();
+  GEN_SIZE_CACHE.clear();
+  GEN_INT_CACHE.clear();
+}
+
+
+function configureGenSize({
+  maxDecimalFractionDigits = MAX_DECIMAL_FRACTION_DIGITS,
+  maxHexFractionDigits = MAX_HEX_FRACTION_DIGITS,
+} = {}) {
+  if (
+    !Number.isInteger(maxDecimalFractionDigits) ||
+    maxDecimalFractionDigits < 1
+  ) {
+    throw new RangeError(
+      "maxDecimalFractionDigits must be a positive integer"
+    );
+  }
+
+  if (
+    !Number.isInteger(maxHexFractionDigits) ||
+    maxHexFractionDigits < 1
+  ) {
+    throw new RangeError(
+      "maxHexFractionDigits must be a positive integer"
+    );
+  }
+
+  if (
+    maxDecimalFractionDigits === MAX_DECIMAL_FRACTION_DIGITS &&
+    maxHexFractionDigits === MAX_HEX_FRACTION_DIGITS
+  ) {
+    return;
+  }
+
+  MAX_DECIMAL_FRACTION_DIGITS = maxDecimalFractionDigits;
+  MAX_HEX_FRACTION_DIGITS = maxHexFractionDigits;
+
+  clearGenSizeCaches();
+
+  globalThis.MAX_DECIMAL_FRACTION_DIGITS =
+    MAX_DECIMAL_FRACTION_DIGITS;
+  globalThis.MAX_HEX_FRACTION_DIGITS =
+    MAX_HEX_FRACTION_DIGITS;
 }
 
 
 // ------------------------------------------------------------
 // Browser / Web Worker globals
-//
-// globalThis は通常のブラウザ画面と Web Worker の両方で利用できる。
 // ------------------------------------------------------------
 
-globalThis.R_MAX = R_MAX;
-globalThis.MAX_SCAN_SIZE = MAX_SCAN_SIZE;
-globalThis.size2int = size2int;
-globalThis.gen_size = gen_size;
-globalThis.gen_int = gen_int;
+Object.assign(globalThis, {
+  MAX_SCAN_SIZE,
+  MAX_DECIMAL_FRACTION_DIGITS,
+  MAX_HEX_FRACTION_DIGITS,
+  size2int,
+  intTokenSize,
+  literalTokenSize,
+  gen_size,
+  gen_int,
+  configureGenSize,
+  clearGenSizeCaches,
+});
