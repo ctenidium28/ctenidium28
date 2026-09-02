@@ -7,50 +7,42 @@
 importScripts(
   "./scan_core.js",
   "./gen_size.js",
-  "./float_format.js",
+  "./gen_size_quick.js",
 );
 
-const formatConstant =
-  typeof globalThis.repFormat === "function"
-    ? globalThis.repFormat
-    : typeof globalThis.rep_format === "function"
-      ? globalThis.rep_format
-      : typeof repFormat === "function"
-        ? repFormat
-        : null;
-
-if (formatConstant === null) {
-  throw new Error(
-    "float_format.js must expose repFormat(tokenSize, value).",
-  );
-}
+const genSizeBroadRaw = globalThis.gen_size;
+const genSizeQuickRaw = globalThis.gen_size_quick;
+const genInt = globalThis.gen_int;
 
 // ------------------------------------------------------------
 // Worker protocol
 // ------------------------------------------------------------
 
-class ScanFinished extends Error {
+class Found extends Error {
   constructor() {
-    super("Scan finished.");
-    this.name = "ScanFinished";
+    super("Found enough expressions.");
+    this.name = "Found";
   }
 }
 
-function finish(expression) {
+let workCounter = 0;
+let foundCount = 0;
+let found = false;
+let maxFoundCurrent = 3;
+
+function drop(expression) {
   postMessage({
     type: "result",
     expression: String(expression),
   });
 
-  throw new ScanFinished();
-}
+  foundCount++;
+  found = true;
 
-function finishNotFound() {
-  postMessage({ type: "not-found" });
-  throw new ScanFinished();
+  if (foundCount >= maxFoundCurrent) {
+    throw new Found();
+  }
 }
-
-let workCounter = 0;
 
 function reportProgress(token, sym = null, force = false) {
   if (!force) {
@@ -69,20 +61,107 @@ function reportProgress(token, sym = null, force = false) {
   });
 }
 
+function finishRun() {
+  postMessage({
+    type: "done",
+    foundCount,
+  });
+}
+
 // ------------------------------------------------------------
 // Small utilities
 // ------------------------------------------------------------
 
-function isFiniteNumber(value) {
-  return typeof value === "number" && Number.isFinite(value);
+function isFiniteLuaNumber(value) {
+  return (
+    typeof value === "bigint" ||
+    (
+      typeof value === "number" &&
+      Number.isFinite(value)
+    )
+  );
 }
 
 function isIntegerValue(value) {
-  return isFiniteNumber(value) && Number.isInteger(value);
+  return (
+    typeof value === "bigint" ||
+    (
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      Number.isInteger(value)
+    )
+  );
 }
 
-function isSafeIntegerValue(value) {
-  return isFiniteNumber(value) && Number.isSafeInteger(value);
+function isZero(value) {
+  return value === 0 || value === 0n;
+}
+
+function isOne(value) {
+  return value === 1 || value === 1n;
+}
+
+function absLua(value) {
+  if (typeof value === "bigint") {
+    return value < 0n ? -value : value;
+  }
+
+  return Math.abs(value);
+}
+
+function numericKey(value) {
+  if (typeof value === "bigint") {
+    return `i:${value}`;
+  }
+
+  if (typeof value !== "number") {
+    throw new TypeError("number expected");
+  }
+
+  if (
+    Number.isFinite(value) &&
+    Number.isInteger(value)
+  ) {
+    try {
+      return `i:${BigInt(value)}`;
+    } catch {
+      // fall through
+    }
+  }
+
+  if (Number.isNaN(value)) {
+    return "f:nan";
+  }
+
+  if (Object.is(value, -0)) {
+    return "i:0";
+  }
+
+  return `f:${value}`;
+}
+
+function arrayMax(values) {
+  let result = values[0];
+
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] > result) {
+      result = values[i];
+    }
+  }
+
+  return result;
+}
+
+function arrayMin(values) {
+  let result = values[0];
+
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] < result) {
+      result = values[i];
+    }
+  }
+
+  return result;
 }
 
 function all(values, predicate) {
@@ -95,130 +174,265 @@ function all(values, predicate) {
   return true;
 }
 
-function arrayMax(values) {
-  let result = -Infinity;
-
-  for (const value of values) {
-    if (value > result) {
-      result = value;
-    }
-  }
-
-  return result;
-}
-
-function arrayMin(values) {
-  let result = Infinity;
-
-  for (const value of values) {
-    if (value < result) {
-      result = value;
-    }
-  }
-
-  return result;
-}
-
 function transformedOutputMap(sx, xOut) {
   const map = new Map();
 
   for (let i = 0; i < sx.length; i++) {
-    map.set(sx[i], xOut[i]);
+    map.set(
+      numericKey(sx[i]),
+      xOut[i],
+    );
   }
 
   return map;
 }
 
-const FUNC_LIST = [
-  ["sin", Math.sin],
-  ["cos", Math.cos],
-  ["tan", Math.tan],
+function indexOfNumeric(values, target) {
+  const key = numericKey(target);
+
+  for (let i = 0; i < values.length; i++) {
+    if (numericKey(values[i]) === key) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+function isEvenInteger(value) {
+  if (typeof value === "bigint") {
+    return value % 2n === 0n;
+  }
+
+  return (
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value % 2 === 0
+  );
+}
+
+function normalizeInputValue(value) {
+  if (typeof value === "bigint") {
+    return normalizeNumber(value);
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error(
+        "x_in must contain finite numbers."
+      );
+    }
+
+    if (Number.isSafeInteger(value)) {
+      return BigInt(value);
+    }
+
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = luaLiteralValue(value);
+
+    if (!isFiniteLuaNumber(parsed)) {
+      throw new Error(
+        "x_in must contain finite numbers."
+      );
+    }
+
+    return parsed;
+  }
+
+  if (
+    value &&
+    typeof value === "object"
+  ) {
+    if (value.type === "int") {
+      return normalizeNumber(
+        BigInt(value.value)
+      );
+    }
+
+    if (value.type === "float") {
+      const parsed = Number(value.value);
+
+      if (!Number.isFinite(parsed)) {
+        throw new Error(
+          "x_in must contain finite numbers."
+        );
+      }
+
+      return parsed;
+    }
+  }
+
+  throw new Error(
+    "x_in must contain finite numbers."
+  );
+}
+
+function hasDuplicateNumbers(values) {
+  const seen = new Set();
+
+  for (const value of values) {
+    const key = numericKey(value);
+
+    if (seen.has(key)) {
+      return true;
+    }
+
+    seen.add(key);
+  }
+
+  return false;
+}
+
+function formatInteger(value) {
+  return String(value);
+}
+
+const FUNC_LIST_SCAN = [
+  ["sin", luaSin],
+  ["cos", luaCos],
+  ["tan", luaTan],
 ];
 
 const BIT_LIST = [
-  ["&", bitAnd],
-  ["|", bitOr],
-  ["~", bitXor],
+  ["&", band],
+  ["|", bor],
+  ["~", bxor],
 ];
 
 // ------------------------------------------------------------
 // Core scan
 // ------------------------------------------------------------
 
-function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
-  let xIn = rawXIn.slice();
+function runExpressionScan(
+  rawXIn,
+  rawXOut,
+  maxToken,
+  quick,
+  maxFound,
+) {
+  let xIn = rawXIn.map(
+    normalizeInputValue
+  );
+
   let xOut = rawXOut.slice();
 
   if (xIn.length !== xOut.length) {
-    throw new Error("Please make x_in and x_out the same length.");
+    throw new Error(
+      "Please make x_in and x_out the same length."
+    );
   }
 
   const leng = xIn.length;
 
   if (leng === 0) {
-    throw new Error("Please enter at least one input pair.");
+    throw new Error(
+      "Please enter at least one input pair."
+    );
   }
 
-  if (!xIn.every(isFiniteNumber)) {
-    throw new Error("x_in must contain finite numbers.");
+  if (hasDuplicateNumbers(xIn)) {
+    throw new Error(
+      "x_in contains duplicate values."
+    );
   }
 
-  if (new Set(xIn).size < leng) {
-    throw new Error("x_in contains duplicate values.");
+  if (
+    !xOut.every(
+      x =>
+        Number.isInteger(x) &&
+        0 <= x &&
+        x <= 16
+    )
+  ) {
+    throw new Error(
+      "x_out must contain integers from 0 to 16."
+    );
   }
 
-  if (!xOut.every(x => isIntegerValue(x) && 0 <= x && x <= 16)) {
-    throw new Error("x_out must contain integers from 0 to 16.");
-  }
+  foundCount = 0;
+  found = false;
+  maxFoundCurrent = maxFound;
+  workCounter = 0;
 
-  const numColor = new Set(xOut).size;
+  const numColor =
+    new Set(xOut).size;
 
   if (numColor <= 1) {
-    finish(xOut[0]);
+    drop(xOut[0]);
+    throw new Found();
   }
 
-  const maxOut = arrayMax(xOut);
+  const maxOut =
+    Math.max(...xOut);
 
   let zeroCount = 0;
+
   for (const value of xOut) {
     if (value === 0) {
       zeroCount++;
     }
   }
-  const zeroRatio = zeroCount / leng;
 
-  // Sort x_in ascending together with x_out.
-  const pairs = xIn.map((xi, i) => [xi, xOut[i]]);
-  pairs.sort((a, b) => a[0] - b[0]);
+  const zeroRatio =
+    zeroCount / leng;
 
-  xIn = pairs.map(pair => pair[0]);
-  xOut = pairs.map(pair => pair[1]);
+  const pairs =
+    xIn.map(
+      (xi, i) => [xi, xOut[i]]
+    );
+
+  pairs.sort(
+    (a, b) =>
+      a[0] < b[0]
+        ? -1
+        : a[0] > b[0]
+          ? 1
+          : 0
+  );
+
+  xIn =
+    pairs.map(pair => pair[0]);
+
+  xOut =
+    pairs.map(pair => pair[1]);
 
   const coloredIdx = [];
+
   for (let i = 0; i < leng; i++) {
     if (xOut[i] > 0) {
       coloredIdx.push(i);
     }
   }
 
-  // Web版のビット演算はBigIntへ変換するため、safe integerだけを許可する。
-  const isInt = xIn.every(isSafeIntegerValue);
+  const isInt =
+    xIn.every(isIntegerValue);
 
   const sList = [
     xIn,
-    xIn.map(x => -x),
+    xIn.map(x => sneg(x)),
   ];
 
   const sStr = ["", "-"];
 
   if (isInt) {
     sList.push(
-      xIn.map(x => -x - 1),
-      xIn.map(x => x + 1),
-      xIn.map(x => x - 1),
+      xIn.map(x => bnot(x)),
+      xIn.map(
+        x => sneg(bnot(x))
+      ),
+      xIn.map(
+        x => bnot(sneg(x))
+      ),
     );
 
-    sStr.push("~", "-~", "~-");
+    sStr.push(
+      "~",
+      "-~",
+      "~-",
+    );
   }
 
   let l0 = 0;
@@ -232,103 +446,312 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
     r0--;
   }
 
-  const xCod = xOut.slice(l0, r0);
-  const isDense = !xCod.includes(0);
+  const xCod =
+    xOut.slice(l0, r0);
 
-  workCounter = 0;
+  const isDense =
+    !xCod.includes(0);
 
-  for (let token = 3; token <= maxToken; token++) {
-    reportProgress(token, null, true);
+  const rawGenSize =
+    quick
+      ? genSizeQuickRaw
+      : genSizeBroadRaw;
 
-    for (let si = 0; si < sList.length; si++) {
+  const positiveCache =
+    new Map();
+
+  const negativeCache =
+    new Map();
+
+  function genSize(tokenSize) {
+    if (
+      positiveCache.has(
+        tokenSize
+      )
+    ) {
+      return positiveCache.get(
+        tokenSize
+      );
+    }
+
+    const out =
+      rawGenSize(tokenSize)
+        .filter(
+          ([, a]) => a > 0
+        );
+
+    positiveCache.set(
+      tokenSize,
+      out
+    );
+
+    return out;
+  }
+
+  function genSizeNeg(tokenSize) {
+    if (
+      negativeCache.has(
+        tokenSize
+      )
+    ) {
+      return negativeCache.get(
+        tokenSize
+      );
+    }
+
+    let out;
+
+    if (quick) {
+      out =
+        genSize(tokenSize)
+          .map(
+            ([rep, a]) => [
+              `-${rep}`,
+              sneg(a),
+            ]
+          );
+    } else {
+      out =
+        rawGenSize(tokenSize)
+          .filter(
+            ([, a]) => a < 0
+          );
+    }
+
+    negativeCache.set(
+      tokenSize,
+      out
+    );
+
+    return out;
+  }
+
+  for (
+    let token = 3;
+    token <= maxToken;
+    token++
+  ) {
+    if (found) {
+      throw new Found();
+    }
+
+    reportProgress(
+      token,
+      null,
+      true
+    );
+
+    for (
+      let si = 0;
+      si < sList.length;
+      si++
+    ) {
       const sym = sStr[si];
       const sx = sList[si];
       const symLen = sym.length;
 
-      const xDom = sx.slice(l0, r0);
-      const zeroIndex = sx.indexOf(0);
-      const oneIndex = sx.indexOf(1);
-      const minusOneIndex = sx.indexOf(-1);
-      const unitIndex = oneIndex !== -1 ? oneIndex : minusOneIndex;
+      const xDom =
+        sx.slice(l0, r0);
 
-      const sxToOut = transformedOutputMap(sx, xOut);
+      const zeroIndex =
+        indexOfNumeric(
+          sx,
+          0n
+        );
+
+      const oneIndex =
+        indexOfNumeric(
+          sx,
+          1n
+        );
+
+      const minusOneIndex =
+        indexOfNumeric(
+          sx,
+          -1n
+        );
+
+      const unitIndex =
+        oneIndex !== -1
+          ? oneIndex
+          : minusOneIndex;
+
+      const sxToOut =
+        transformedOutputMap(
+          sx,
+          xOut
+        );
+
       let isEvenCompatible = true;
 
-      for (let i = 0; i < sx.length; i++) {
-        const opposite = -sx[i];
+      for (
+        let i = 0;
+        i < sx.length;
+        i++
+      ) {
+        const oppositeKey =
+          numericKey(
+            sneg(sx[i])
+          );
 
         if (
-          sxToOut.has(opposite) &&
-          sxToOut.get(opposite) !== xOut[i]
+          sxToOut.has(
+            oppositeKey
+          ) &&
+          sxToOut.get(
+            oppositeKey
+          ) !== xOut[i]
         ) {
           isEvenCompatible = false;
           break;
         }
       }
 
-      const inc = sx[0] < sx[sx.length - 1];
+      const inc =
+        sx[0] <
+        sx[sx.length - 1];
 
       let belowDom;
       let aboveDom;
 
       if (inc) {
-        belowDom = sx.slice(0, l0);
-        aboveDom = sx.slice(r0);
+        belowDom =
+          sx.slice(0, l0);
+
+        aboveDom =
+          sx.slice(r0);
       } else {
-        belowDom = sx.slice(r0);
-        aboveDom = sx.slice(0, l0);
+        belowDom =
+          sx.slice(r0);
+
+        aboveDom =
+          sx.slice(0, l0);
       }
 
-      const domPositive = all(xDom, x => x > 0);
-      const domNonnegative = all(xDom, x => x >= 0);
-      const domNonpositive = all(xDom, x => x <= 0);
+      const domPositive =
+        all(
+          xDom,
+          x => x > 0
+        );
 
-      const belowNegative = all(belowDom, x => x < 0);
-      const belowNonpositive = all(belowDom, x => x <= 0);
+      const domNonnegative =
+        all(
+          xDom,
+          x => x >= 0
+        );
 
-      const abovePositive = all(aboveDom, x => x > 0);
-      const aboveNonnegative = all(aboveDom, x => x >= 0);
+      const domNonpositive =
+        all(
+          xDom,
+          x => x <= 0
+        );
 
-      // ------------------------------------------------------
+      const belowNegative =
+        all(
+          belowDom,
+          x => x < 0
+        );
+
+      const belowNonpositive =
+        all(
+          belowDom,
+          x => x <= 0
+        );
+
+      const abovePositive =
+        all(
+          aboveDom,
+          x => x > 0
+        );
+
+      const aboveNonnegative =
+        all(
+          aboveDom,
+          x => x >= 0
+        );
+
       // 0^x
-      // ------------------------------------------------------
-
       let zeroPowOk = true;
 
-      for (let i = 0; i < sx.length; i++) {
-        const expected = sx[i] === 0 ? 1 : 0;
+      for (
+        let i = 0;
+        i < sx.length;
+        i++
+      ) {
+        const expected =
+          isZero(sx[i])
+            ? 1
+            : 0;
 
-        if (xOut[i] !== expected) {
+        if (
+          xOut[i] !== expected
+        ) {
           zeroPowOk = false;
           break;
         }
       }
 
-      const zeroPowToken = symLen + 3;
+      const zeroPowToken =
+        symLen + 3;
 
-      if (token === zeroPowToken && zeroPowOk) {
-        finish(`0^${sym}x`);
+      if (
+        token ===
+          zeroPowToken &&
+        zeroPowOk
+      ) {
+        drop(
+          `0^${sym}x`
+        );
       }
 
-      // ------------------------------------------------------
       // a+x / a-x
-      // ------------------------------------------------------
-
-      if (isDense && token === 3 && (sym === "" || sym === "-")) {
+      if (
+        isDense &&
+        token === 3 &&
+        (
+          sym === "" ||
+          sym === "-"
+        )
+      ) {
         let A;
 
         if (isInt) {
-          A = gen_int(1);
+          A =
+            genInt(1)
+              .map(
+                a => [
+                  formatInteger(a),
+                  a,
+                ]
+              );
         } else {
-          const G = gen_size(1);
-          A = G.concat(G.map(a => -a));
+          A =
+            genSize(1)
+              .concat(
+                genSizeNeg(1)
+              );
         }
 
-        for (const a of A) {
+        for (
+          const [repA, a]
+          of A
+        ) {
           let good = true;
 
-          for (let i = 0; i < sx.length; i++) {
-            if (disp(a + sx[i]) !== xOut[i]) {
+          for (
+            let i = 0;
+            i < sx.length;
+            i++
+          ) {
+            if (
+              disp(
+                sadd(
+                  a,
+                  sx[i]
+                )
+              ) !==
+              xOut[i]
+            ) {
               good = false;
               break;
             }
@@ -336,107 +759,271 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
 
           if (good) {
             if (sym === "") {
-              finish(`${formatConstant(1, a)}+x`);
+              drop(
+                `${repA}+x`
+              );
             } else {
-              finish(`${formatConstant(1, a)}-x`);
+              drop(
+                `${repA}-x`
+              );
             }
           }
 
-          reportProgress(token, sym);
+          reportProgress(
+            token,
+            sym
+          );
         }
       }
 
-      // ------------------------------------------------------
       // a^x
-      // ------------------------------------------------------
-
-      let tokenRange = token - symLen - 2;
+      let tokenRange =
+        token -
+        symLen -
+        2;
 
       if (
         isDense &&
         1 <= tokenRange &&
         tokenRange <= 4 &&
-        (zeroIndex === -1 || xOut[zeroIndex] === 1)
+        (
+          zeroIndex === -1 ||
+          xOut[zeroIndex] === 1
+        )
       ) {
-        let A;
+        let A = [];
 
-        if (domNonnegative && belowNegative) {
+        if (
+          domNonnegative &&
+          belowNegative
+        ) {
           if (inc) {
             if (r0 < leng) {
-              const border = LIMIT ** (1 / sx[r0]);
-              A = gen_size(tokenRange).filter(a => a >= border);
+              const border =
+                LIMIT **
+                (
+                  1 /
+                  toFloat(
+                    sx[r0]
+                  )
+                );
+
+              A =
+                genSize(
+                  tokenRange
+                )
+                  .filter(
+                    ([, a]) =>
+                      a >= border
+                  );
             } else {
-              const border = LIMIT ** (1 / sx[sx.length - 1]);
-              A = gen_size(tokenRange).filter(
-                a => 1 < a && a < border,
-              );
+              const border =
+                LIMIT **
+                (
+                  1 /
+                  toFloat(
+                    sx[
+                      sx.length - 1
+                    ]
+                  )
+                );
+
+              A =
+                genSize(
+                  tokenRange
+                )
+                  .filter(
+                    ([, a]) =>
+                      1 < a &&
+                      a < border
+                  );
             }
-          } else if (l0 > 0) {
-            const border = LIMIT ** (1 / sx[l0 - 1]);
-            A = gen_size(tokenRange).filter(a => a >= border);
+          } else if (
+            l0 > 0
+          ) {
+            const border =
+              LIMIT **
+              (
+                1 /
+                toFloat(
+                  sx[l0 - 1]
+                )
+              );
+
+            A =
+              genSize(
+                tokenRange
+              )
+                .filter(
+                  ([, a]) =>
+                    a >= border
+                );
           } else {
-            const border = LIMIT ** (1 / sx[0]);
-            A = gen_size(tokenRange).filter(
-              a => 1 < a && a < border,
-            );
+            const border =
+              LIMIT **
+              (
+                1 /
+                toFloat(sx[0])
+              );
+
+            A =
+              genSize(
+                tokenRange
+              )
+                .filter(
+                  ([, a]) =>
+                    1 < a &&
+                    a < border
+                );
           }
-        } else if (domNonpositive && abovePositive) {
+        } else if (
+          domNonpositive &&
+          abovePositive
+        ) {
           if (inc) {
             if (l0 > 0) {
-              const border = LIMIT ** (1 / sx[l0 - 1]);
-              A = gen_size(tokenRange).filter(a => a <= border);
+              const border =
+                LIMIT **
+                (
+                  1 /
+                  toFloat(
+                    sx[l0 - 1]
+                  )
+                );
+
+              A =
+                genSize(
+                  tokenRange
+                )
+                  .filter(
+                    ([, a]) =>
+                      a <= border
+                  );
             } else {
-              const border = LIMIT ** (1 / sx[0]);
-              A = gen_size(tokenRange).filter(
-                a => border < a && a < 1,
-              );
+              const border =
+                LIMIT **
+                (
+                  1 /
+                  toFloat(sx[0])
+                );
+
+              A =
+                genSize(
+                  tokenRange
+                )
+                  .filter(
+                    ([, a]) =>
+                      border < a &&
+                      a < 1
+                  );
             }
-          } else if (r0 < leng) {
-            const border = LIMIT ** (1 / sx[r0]);
-            A = gen_size(tokenRange).filter(a => a <= border);
+          } else if (
+            r0 < leng
+          ) {
+            const border =
+              LIMIT **
+              (
+                1 /
+                toFloat(
+                  sx[r0]
+                )
+              );
+
+            A =
+              genSize(
+                tokenRange
+              )
+                .filter(
+                  ([, a]) =>
+                    a <= border
+                );
           } else {
-            const border = LIMIT ** (1 / sx[sx.length - 1]);
-            A = gen_size(tokenRange).filter(
-              a => border < a && a < 1,
-            );
+            const border =
+              LIMIT **
+              (
+                1 /
+                toFloat(
+                  sx[
+                    sx.length - 1
+                  ]
+                )
+              );
+
+            A =
+              genSize(
+                tokenRange
+              )
+                .filter(
+                  ([, a]) =>
+                    border < a &&
+                    a < 1
+                );
           }
-        } else {
-          A = [];
         }
 
-        for (const a of A) {
+        for (
+          const [repA, a]
+          of A
+        ) {
           let good = true;
 
-          for (let i = 0; i < sx.length; i++) {
-            if (disp(spow(a, sx[i])) !== xOut[i]) {
+          for (
+            let i = 0;
+            i < sx.length;
+            i++
+          ) {
+            if (
+              disp(
+                spow(
+                  a,
+                  sx[i]
+                )
+              ) !==
+              xOut[i]
+            ) {
               good = false;
               break;
             }
           }
 
           if (good) {
-            finish(`${formatConstant(tokenRange, a)}^${sym}x`);
+            drop(
+              `${repA}^${sym}x`
+            );
           }
 
-          reportProgress(token, sym);
+          reportProgress(
+            token,
+            sym
+          );
         }
       }
 
-      // ------------------------------------------------------
       // x/a
-      // ------------------------------------------------------
-
-      tokenRange = token - symLen - 2;
+      tokenRange =
+        token -
+        symLen -
+        2;
 
       let ok =
         isDense &&
         1 <= tokenRange &&
         tokenRange <= 4 &&
         (
-          (domNonnegative && belowNonpositive) ||
-          (domNonpositive && aboveNonnegative)
+          (
+            domNonnegative &&
+            belowNonpositive
+          ) ||
+          (
+            domNonpositive &&
+            aboveNonnegative
+          )
         ) &&
-        (sym === "" || sym === "~" || sym === "~-");
+        (
+          sym === "" ||
+          sym === "~" ||
+          sym === "~-"
+        );
 
       if (quick) {
         ok =
@@ -446,50 +1033,108 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
       } else {
         ok =
           ok &&
-          (zeroIndex === -1 || xOut[zeroIndex] === 0);
+          (
+            zeroIndex === -1 ||
+            xOut[zeroIndex] === 0
+          );
       }
 
       if (ok) {
         let A;
 
-        if (domNonnegative && domNonpositive) {
-          finish(0);
-        } else if (domNonnegative && belowNonpositive) {
-          const maximum = arrayMax(xDom);
-          A = gen_size(tokenRange).filter(
-            a => maximum / LIMIT < a && a < 1,
-          );
+        if (
+          domNonnegative &&
+          domNonpositive
+        ) {
+          drop(0);
+          A = [];
+        } else if (
+          domNonnegative &&
+          belowNonpositive
+        ) {
+          const maximum =
+            toFloat(
+              arrayMax(xDom)
+            );
+
+          A =
+            genSize(
+              tokenRange
+            )
+              .filter(
+                ([, a]) =>
+                  maximum /
+                    LIMIT <
+                    a &&
+                  a < 1
+              );
         } else {
-          const minimum = arrayMin(xDom);
-          A = gen_size(tokenRange)
-            .filter(a => -minimum / LIMIT < a && a < 1)
-            .map(a => -a);
+          const minimum =
+            toFloat(
+              arrayMin(xDom)
+            );
+
+          A =
+            genSizeNeg(
+              tokenRange
+            )
+              .filter(
+                ([, a]) =>
+                  -minimum /
+                    LIMIT <
+                    -toFloat(a) &&
+                  -toFloat(a) <
+                    1
+              );
         }
 
-        for (const a of A) {
+        for (
+          const [repA, a]
+          of A
+        ) {
           let good = true;
 
-          for (let i = 0; i < sx.length; i++) {
-            if (disp(sdiv(sx[i], a)) !== xOut[i]) {
+          for (
+            let i = 0;
+            i < sx.length;
+            i++
+          ) {
+            if (
+              disp(
+                sdiv(
+                  sx[i],
+                  a
+                )
+              ) !==
+              xOut[i]
+            ) {
               good = false;
               break;
             }
           }
 
           if (good) {
-            finish(`${sym}x/${formatConstant(tokenRange, a)}`);
+            drop(
+              `${sym}x/${repA}`
+            );
           }
 
-          reportProgress(token, sym);
+          reportProgress(
+            token,
+            sym
+          );
         }
       }
 
-      // ------------------------------------------------------
       // x^a
-      // ------------------------------------------------------
+      const parenToken =
+        sym ? 1 : 0;
 
-      const parenToken = sym === "" ? 0 : 1;
-      tokenRange = token - symLen - parenToken - 2;
+      tokenRange =
+        token -
+        symLen -
+        parenToken -
+        2;
 
       let positivePowerOk =
         1 <= tokenRange &&
@@ -522,30 +1167,62 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
       } else {
         positivePowerOk =
           positivePowerOk &&
-          (zeroIndex === -1 || xOut[zeroIndex] === 0) &&
-          (oneIndex === -1 || xOut[oneIndex] === 1);
+          (
+            zeroIndex === -1 ||
+            xOut[zeroIndex] === 0
+          ) &&
+          (
+            oneIndex === -1 ||
+            xOut[oneIndex] === 1
+          );
 
         evenPowerOk =
           evenPowerOk &&
-          (zeroIndex === -1 || xOut[zeroIndex] === 0) &&
-          (unitIndex === -1 || xOut[unitIndex] === 1);
+          (
+            zeroIndex === -1 ||
+            xOut[zeroIndex] === 0
+          ) &&
+          (
+            unitIndex === -1 ||
+            xOut[unitIndex] === 1
+          );
       }
 
-      if (positivePowerOk || evenPowerOk) {
-        const G = gen_size(tokenRange);
+      if (
+        positivePowerOk ||
+        evenPowerOk
+      ) {
+        const G =
+          genSize(
+            tokenRange
+          );
+
         const A = [];
-        const seenA = new Set();
+        const seenA =
+          new Set();
 
         if (positivePowerOk) {
           let impossible = false;
           let aLow = 0;
           let aHigh = Infinity;
 
-          for (let i = 0; i < xDom.length; i++) {
-            const x = xDom[i];
-            const y = xCod[i];
+          for (
+            let i = 0;
+            i < xDom.length;
+            i++
+          ) {
+            const x =
+              toFloat(
+                xDom[i]
+              );
 
-            if (0 < x && x < 1) {
+            const y =
+              xCod[i];
+
+            if (
+              0 < x &&
+              x < 1
+            ) {
               impossible = true;
               break;
             }
@@ -559,21 +1236,46 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
               continue;
             }
 
-            const logX = Math.log(x);
-            aLow = Math.max(aLow, Math.log(y) / logX);
-            aHigh = Math.min(aHigh, Math.log(LIMIT) / logX);
+            const logX =
+              Math.log(x);
+
+            aLow =
+              Math.max(
+                aLow,
+                Math.log(y) /
+                  logX
+              );
+
+            aHigh =
+              Math.min(
+                aHigh,
+                Math.log(LIMIT) /
+                  logX
+              );
           }
 
-          if (!impossible && aLow < aHigh) {
-            for (const a of G) {
+          if (
+            !impossible &&
+            aLow < aHigh
+          ) {
+            for (
+              const [repA, a]
+              of G
+            ) {
+              const key =
+                numericKey(a);
+
               if (
-                a > 0 &&
                 aLow <= a &&
                 a < aHigh &&
-                !seenA.has(a)
+                !seenA.has(key)
               ) {
-                seenA.add(a);
-                A.push(a);
+                seenA.add(key);
+
+                A.push([
+                  repA,
+                  a,
+                ]);
               }
             }
           }
@@ -584,11 +1286,25 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
           let aLow = 0;
           let aHigh = Infinity;
 
-          for (const i of coloredIdx) {
-            const x = Math.abs(sx[i]);
-            const y = xOut[i];
+          for (
+            const i
+            of coloredIdx
+          ) {
+            const x =
+              Math.abs(
+                toFloat(sx[i])
+              );
 
-            if (x === 0 || (0 < x && x < 1)) {
+            const y =
+              xOut[i];
+
+            if (
+              x === 0 ||
+              (
+                0 < x &&
+                x < 1
+              )
+            ) {
               impossible = true;
               break;
             }
@@ -602,380 +1318,705 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
               continue;
             }
 
-            const logX = Math.log(x);
-            aLow = Math.max(aLow, Math.log(y) / logX);
-            aHigh = Math.min(aHigh, Math.log(LIMIT) / logX);
+            const logX =
+              Math.log(x);
+
+            aLow =
+              Math.max(
+                aLow,
+                Math.log(y) /
+                  logX
+              );
+
+            aHigh =
+              Math.min(
+                aHigh,
+                Math.log(LIMIT) /
+                  logX
+              );
           }
 
-          if (!impossible && aLow < aHigh) {
-            for (const a of G) {
-              const isEvenInteger =
-                a > 0 &&
-                Number.isInteger(a) &&
-                a % 2 === 0;
+          if (
+            !impossible &&
+            aLow < aHigh
+          ) {
+            for (
+              const [repA, a]
+              of G
+            ) {
+              const key =
+                numericKey(a);
 
               if (
-                isEvenInteger &&
+                isEvenInteger(a) &&
                 aLow <= a &&
                 a < aHigh &&
-                !seenA.has(a)
+                !seenA.has(key)
               ) {
-                seenA.add(a);
-                A.push(a);
+                seenA.add(key);
+
+                A.push([
+                  repA,
+                  a,
+                ]);
               }
             }
           }
         }
 
-        for (const a of A) {
+        for (
+          const [repA, a]
+          of A
+        ) {
           let good = true;
 
-          for (let i = 0; i < sx.length; i++) {
-            if (disp(spow(sx[i], a)) !== xOut[i]) {
+          for (
+            let i = 0;
+            i < sx.length;
+            i++
+          ) {
+            if (
+              disp(
+                spow(
+                  sx[i],
+                  a
+                )
+              ) !==
+              xOut[i]
+            ) {
               good = false;
               break;
             }
           }
 
           if (good) {
-            const repA = formatConstant(tokenRange, a);
-
             if (sym === "") {
-              finish(`x^${repA}`);
+              drop(
+                `x^${repA}`
+              );
             } else {
-              finish(`(${sym}x)^${repA}`);
+              drop(
+                `(${sym}x)^${repA}`
+              );
             }
           }
 
-          reportProgress(token, sym);
+          reportProgress(
+            token,
+            sym
+          );
         }
       }
 
-      // ------------------------------------------------------
       // x%a
-      // ------------------------------------------------------
+      tokenRange =
+        token -
+        symLen -
+        2;
 
-      tokenRange = token - symLen - 2;
+      if (
+        1 <= tokenRange &&
+        tokenRange <= 2
+      ) {
+        const G =
+          genSize(
+            tokenRange
+          );
 
-      if (1 <= tokenRange && tokenRange <= 2) {
-        const G = gen_size(tokenRange);
         let A;
 
-        if (all(sx, x => x >= 0)) {
-          const sxMax = arrayMax(sx);
-          A = G.filter(a => 1 < a && a <= sxMax);
+        if (
+          all(
+            sx,
+            x => x >= 0
+          )
+        ) {
+          const sxMax =
+            arrayMax(sx);
+
+          A =
+            G.filter(
+              ([, a]) =>
+                1 < a &&
+                a <= sxMax
+            );
         } else {
-          A = G.filter(a => 1 < a);
+          A =
+            G.filter(
+              ([, a]) =>
+                1 < a
+            );
         }
 
-        for (const a of A) {
+        for (
+          const [repA, a]
+          of A
+        ) {
           let good = true;
 
-          for (let i = 0; i < sx.length; i++) {
-            if (disp(smod(sx[i], a)) !== xOut[i]) {
+          for (
+            let i = 0;
+            i < sx.length;
+            i++
+          ) {
+            if (
+              disp(
+                smod(
+                  sx[i],
+                  a
+                )
+              ) !==
+              xOut[i]
+            ) {
               good = false;
               break;
             }
           }
 
           if (good) {
-            finish(`${sym}x%${formatConstant(tokenRange, a)}`);
+            drop(
+              `${sym}x%${repA}`
+            );
           }
 
-          reportProgress(token, sym);
+          reportProgress(
+            token,
+            sym
+          );
         }
       }
 
-      // ------------------------------------------------------
       // a%x
-      // ------------------------------------------------------
+      tokenRange =
+        token -
+        symLen -
+        2;
 
-      tokenRange = token - symLen - 2;
+      if (
+        1 <= tokenRange &&
+        tokenRange <= 2
+      ) {
+        const A =
+          genSize(tokenRange)
+            .filter(
+              ([, a]) =>
+                a > 1
+            )
+            .concat(
+              genSizeNeg(
+                tokenRange
+              )
+                .filter(
+                  ([, a]) =>
+                    a < -1
+                )
+            );
 
-      if (1 <= tokenRange && tokenRange <= 2) {
-        const G = gen_size(tokenRange);
-        const positiveA = G.filter(a => a > 1);
-        const A = positiveA.concat(positiveA.map(a => -a));
-
-        for (const a of A) {
+        for (
+          const [repA, a]
+          of A
+        ) {
           let good = true;
 
-          for (let i = 0; i < sx.length; i++) {
-            if (disp(smod(a, sx[i])) !== xOut[i]) {
+          for (
+            let i = 0;
+            i < sx.length;
+            i++
+          ) {
+            let v;
+
+            try {
+              v =
+                smod(
+                  a,
+                  sx[i]
+                );
+            } catch (error) {
+              if (
+                error instanceof
+                  LuaRuntimeError
+              ) {
+                good = false;
+                break;
+              }
+
+              throw error;
+            }
+
+            if (
+              disp(v) !==
+              xOut[i]
+            ) {
               good = false;
               break;
             }
           }
 
           if (good) {
-            let repA;
-
-            if (Number.isInteger(a)) {
-              const sign = a < 0 ? "-" : "";
-              repA = `${sign}0x${Math.abs(a).toString(16)}p0`;
-            } else {
-              repA = formatConstant(tokenRange, a);
-            }
-
-            finish(`${repA}%${sym}x`);
+            drop(
+              `${repA}%${sym}x`
+            );
           }
 
-          reportProgress(token, sym);
+          reportProgress(
+            token,
+            sym
+          );
         }
       }
 
-      // ------------------------------------------------------
       // x&a, x|a, x~a
-      // ------------------------------------------------------
-
-      tokenRange = token - symLen - 2;
+      tokenRange =
+        token -
+        symLen -
+        2;
 
       if (
         1 <= tokenRange &&
         tokenRange <= 4 &&
         isInt
       ) {
-        for (const [symOp, op] of BIT_LIST) {
-          for (const a of gen_int(tokenRange)) {
+        for (
+          const [symOp, op]
+          of BIT_LIST
+        ) {
+          for (
+            const a
+            of genInt(
+              tokenRange
+            )
+          ) {
             let good = true;
 
-            for (let i = 0; i < sx.length; i++) {
-              if (disp(op(sx[i], a)) !== xOut[i]) {
+            for (
+              let i = 0;
+              i < sx.length;
+              i++
+            ) {
+              if (
+                disp(
+                  op(
+                    sx[i],
+                    a
+                  )
+                ) !==
+                xOut[i]
+              ) {
                 good = false;
                 break;
               }
             }
 
             if (good) {
-              finish(`${sym}x${symOp}${a}`);
+              drop(
+                `${sym}x${symOp}${a}`
+              );
             }
 
-            reportProgress(token, sym);
+            reportProgress(
+              token,
+              sym
+            );
           }
         }
       }
 
-      // ------------------------------------------------------
       // a^x/b, b/a^x, a^x*b
-      // ------------------------------------------------------
+      tokenRange =
+        token -
+        symLen -
+        3;
 
-      tokenRange = token - symLen - 3;
-
-      if (isDense && tokenRange >= 2) {
+      if (
+        isDense &&
+        tokenRange >= 2
+      ) {
         const li = l0;
         const ri = r0 - 1;
-        const yl = xOut[li];
-        const yr = xOut[ri];
 
-        for (let t = 1; t < tokenRange; t++) {
-          const bt = tokenRange - t;
+        const yl =
+          xOut[li];
 
-          if (t > 4 || bt > 4) {
+        const yr =
+          xOut[ri];
+
+        for (
+          let t = 1;
+          t < tokenRange;
+          t++
+        ) {
+          const bt =
+            tokenRange - t;
+
+          if (
+            t > 4 ||
+            bt > 4
+          ) {
             continue;
           }
 
-          const A = gen_size(t);
-          const B = gen_size(bt);
+          const A =
+            genSize(t);
+
+          const B =
+            genSize(bt);
 
           let B1Base;
           let B2Base;
 
-          if (zeroIndex !== -1) {
-            const y0 = xOut[zeroIndex];
-            B1Base = B.filter(b => disp(sdiv(1, b)) === y0);
-            B2Base = B.filter(b => disp(b) === y0);
+          if (
+            zeroIndex !== -1
+          ) {
+            const y0 =
+              xOut[zeroIndex];
+
+            B1Base =
+              B.filter(
+                ([, b]) =>
+                  disp(
+                    sdiv(
+                      1n,
+                      b
+                    )
+                  ) === y0
+              );
+
+            B2Base =
+              B.filter(
+                ([, b]) =>
+                  disp(b) === y0
+              );
           } else {
             B1Base = B;
             B2Base = B;
           }
 
-          if (B1Base.length === 0 && B2Base.length === 0) {
+          if (
+            B1Base.length === 0 &&
+            B2Base.length === 0
+          ) {
             continue;
           }
 
           const useBByPowAndMul =
-            sym === "" || sym === "~" || sym === "~-";
+            sym === "" ||
+            sym === "~" ||
+            sym === "~-";
 
-          for (const a of A) {
-            const pl = spow(a, sx[li]);
-            const pr = spow(a, sx[ri]);
+          for (
+            const [repA, a]
+            of A
+          ) {
+            const pl =
+              spow(
+                a,
+                sx[li]
+              );
+
+            const pr =
+              spow(
+                a,
+                sx[ri]
+              );
 
             const canFilterByEndpoint =
-              typeof pl === "number" &&
-              typeof pr === "number" &&
-              Number.isFinite(pl) &&
-              Number.isFinite(pr) &&
+              isFiniteLuaNumber(pl) &&
+              isFiniteLuaNumber(pr) &&
               pl > 0 &&
               pr > 0;
 
             let B1;
             let B2;
 
-            if (canFilterByEndpoint) {
-              const pMin = Math.min(pl, pr);
-              const pMax = Math.max(pl, pr);
+            if (
+              canFilterByEndpoint
+            ) {
+              const pln =
+                toFloat(pl);
 
-              const b1Low = pMax / LIMIT;
-              const b1High = pMin;
+              const prn =
+                toFloat(pr);
 
-              B1 = B1Base.filter(
-                b =>
-                  b1Low <= b &&
-                  b <= b1High &&
-                  disp(sdiv(pl, b)) === yl &&
-                  disp(sdiv(pr, b)) === yr,
-              );
-
-              if (useBByPowAndMul) {
-                const b2DivLow = pMax;
-                const b2DivHigh = LIMIT * pMin;
-
-                const b2MulLow = 1 / pMin;
-                const b2MulHigh = LIMIT / pMax;
-
-                B2 = B2Base.filter(
-                  b =>
-                    (
-                      b2DivLow <= b &&
-                      b <= b2DivHigh &&
-                      disp(sdiv(b, pl)) === yl &&
-                      disp(sdiv(b, pr)) === yr
-                    ) ||
-                    (
-                      b2MulLow <= b &&
-                      b <= b2MulHigh &&
-                      disp(smul(pl, b)) === yl &&
-                      disp(smul(pr, b)) === yr
-                    ),
+              const pMin =
+                Math.min(
+                  pln,
+                  prn
                 );
+
+              const pMax =
+                Math.max(
+                  pln,
+                  prn
+                );
+
+              const b1Low =
+                pMax / LIMIT;
+
+              const b1High =
+                pMin;
+
+              B1 =
+                B1Base.filter(
+                  ([, b]) =>
+                    b1Low <= b &&
+                    b <= b1High &&
+                    disp(
+                      sdiv(
+                        pl,
+                        b
+                      )
+                    ) === yl &&
+                    disp(
+                      sdiv(
+                        pr,
+                        b
+                      )
+                    ) === yr
+                );
+
+              if (
+                useBByPowAndMul
+              ) {
+                const b2DivLow =
+                  pMax;
+
+                const b2DivHigh =
+                  LIMIT * pMin;
+
+                const b2MulLow =
+                  1 / pMin;
+
+                const b2MulHigh =
+                  LIMIT / pMax;
+
+                B2 =
+                  B2Base.filter(
+                    ([, b]) =>
+                      (
+                        b2DivLow <=
+                          b &&
+                        b <=
+                          b2DivHigh &&
+                        disp(
+                          sdiv(
+                            b,
+                            pl
+                          )
+                        ) === yl &&
+                        disp(
+                          sdiv(
+                            b,
+                            pr
+                          )
+                        ) === yr
+                      ) ||
+                      (
+                        b2MulLow <=
+                          b &&
+                        b <=
+                          b2MulHigh &&
+                        disp(
+                          smul(
+                            pl,
+                            b
+                          )
+                        ) === yl &&
+                        disp(
+                          smul(
+                            pr,
+                            b
+                          )
+                        ) === yr
+                      )
+                  );
               } else {
                 B2 = [];
               }
             } else {
               B1 = B1Base;
-              B2 = useBByPowAndMul ? B2Base : [];
+
+              B2 =
+                useBByPowAndMul
+                  ? B2Base
+                  : [];
             }
 
-            if (B1.length === 0 && B2.length === 0) {
+            if (
+              B1.length === 0 &&
+              B2.length === 0
+            ) {
               continue;
             }
 
-            const powVals = sx.map(x => spow(a, x));
-            let repA = null;
+            const powVals =
+              sx.map(
+                x =>
+                  spow(
+                    a,
+                    x
+                  )
+              );
 
-            for (const b of B1) {
+            for (
+              const [repB, b]
+              of B1
+            ) {
               let good = true;
 
-              for (let i = 0; i < powVals.length; i++) {
-                if (disp(sdiv(powVals[i], b)) !== xOut[i]) {
+              for (
+                let i = 0;
+                i < powVals.length;
+                i++
+              ) {
+                if (
+                  disp(
+                    sdiv(
+                      powVals[i],
+                      b
+                    )
+                  ) !==
+                  xOut[i]
+                ) {
                   good = false;
                   break;
                 }
               }
 
               if (good) {
-                if (repA === null) {
-                  repA = formatConstant(t, a);
-                }
-
-                finish(`${repA}^${sym}x/${formatConstant(bt, b)}`);
+                drop(
+                  `${repA}^${sym}x/${repB}`
+                );
               }
 
-              reportProgress(token, sym);
+              reportProgress(
+                token,
+                sym
+              );
             }
 
-            for (const b of B2) {
+            for (
+              const [repB, b]
+              of B2
+            ) {
               let okDiv = true;
               let okMul = true;
 
-              for (let i = 0; i < powVals.length; i++) {
-                const p = powVals[i];
-                const y = xOut[i];
+              for (
+                let i = 0;
+                i < powVals.length;
+                i++
+              ) {
+                const p =
+                  powVals[i];
 
-                if (okDiv && disp(sdiv(b, p)) !== y) {
+                const y =
+                  xOut[i];
+
+                if (
+                  okDiv &&
+                  disp(
+                    sdiv(
+                      b,
+                      p
+                    )
+                  ) !== y
+                ) {
                   okDiv = false;
                 }
 
-                if (okMul && disp(smul(p, b)) !== y) {
+                if (
+                  okMul &&
+                  disp(
+                    smul(
+                      p,
+                      b
+                    )
+                  ) !== y
+                ) {
                   okMul = false;
                 }
 
-                if (!okDiv && !okMul) {
+                if (
+                  !okDiv &&
+                  !okMul
+                ) {
                   break;
                 }
               }
 
-              let result = null;
-
               if (okDiv) {
-                result = "div";
+                drop(
+                  `${repB}/${repA}^${sym}x`
+                );
               } else if (okMul) {
-                result = "mul";
+                drop(
+                  `${repA}^${sym}x*${repB}`
+                );
               }
 
-              if (result !== null) {
-                if (repA === null) {
-                  repA = formatConstant(t, a);
-                }
-
-                const repB = formatConstant(bt, b);
-
-                if (result === "div") {
-                  finish(`${repB}/${repA}^${sym}x`);
-                } else {
-                  finish(`${repA}^${sym}x*${repB}`);
-                }
-              }
-
-              reportProgress(token, sym);
+              reportProgress(
+                token,
+                sym
+              );
             }
           }
         }
       }
 
-      // ------------------------------------------------------
       // (-a)^x/b, b/(-a)^x, (-a)^x*b
-      // ------------------------------------------------------
-      //
-      // 負の底は、指数 sx が全点で整数の場合だけ扱う。
-      // colored 点の指数はすべて同じ偶奇でなければならない。
-      //
-      // 括弧を1 tokenとして追加で数える:
-      //   (-a)^x*b
-      // ------------------------------------------------------
-
-      tokenRange = token - symLen - 4;
+      tokenRange =
+        token -
+        symLen -
+        4;
 
       let negativePowerOk = false;
       let coloredParity = null;
       let sxParity = null;
 
-      if (isInt && tokenRange >= 2) {
-        sxParity = sx.map(x => Math.abs(x % 2));
-        coloredParity = sxParity[coloredIdx[0]];
+      if (
+        isInt &&
+        tokenRange >= 2
+      ) {
+        sxParity =
+          sx.map(
+            x =>
+              Number(
+                toInteger(x) &
+                1n
+              )
+          );
 
-        let sameColoredParity = true;
+        coloredParity =
+          sxParity[
+            coloredIdx[0]
+          ];
 
-        for (const i of coloredIdx) {
-          if (sxParity[i] !== coloredParity) {
-            sameColoredParity = false;
-            break;
-          }
-        }
+        const sameColoredParity =
+          coloredIdx.every(
+            i =>
+              sxParity[i] ===
+              coloredParity
+          );
 
-        let hasOppositeParity = false;
-
-        for (const parity of sxParity) {
-          if (parity !== coloredParity) {
-            hasOppositeParity = true;
-            break;
-          }
-        }
+        const hasOppositeParity =
+          sxParity.some(
+            parity =>
+              parity !==
+              coloredParity
+          );
 
         let parityDense = true;
 
-        for (let i = l0; i < r0; i++) {
-          if (xOut[i] === 0 && sxParity[i] === coloredParity) {
+        for (
+          let i = l0;
+          i < r0;
+          i++
+        ) {
+          if (
+            xOut[i] === 0 &&
+            sxParity[i] ===
+              coloredParity
+          ) {
             parityDense = false;
             break;
           }
@@ -986,12 +2027,23 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
           hasOppositeParity &&
           parityDense;
 
-        if (quick && negativePowerOk) {
-          // Quickでは、0点がすべて偶奇による符号反転だけで
-          // 説明できる場合に限定する。
-          for (let i = 0; i < leng; i++) {
-            if (xOut[i] === 0 && sxParity[i] === coloredParity) {
-              negativePowerOk = false;
+        if (
+          quick &&
+          negativePowerOk
+        ) {
+          for (
+            let i = 0;
+            i < leng;
+            i++
+          ) {
+            if (
+              xOut[i] === 0 &&
+              sxParity[i] ===
+                coloredParity
+            ) {
+              negativePowerOk =
+                false;
+
               break;
             }
           }
@@ -1001,272 +2053,1107 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
       if (negativePowerOk) {
         const li = l0;
         const ri = r0 - 1;
-        const yl = xOut[li];
-        const yr = xOut[ri];
 
-        // colored 点の (-a)^x と同符号の b だけが有効。
-        const bSign = coloredParity === 0 ? 1 : -1;
+        const yl =
+          xOut[li];
 
-        for (let t = 1; t < tokenRange; t++) {
-          const bt = tokenRange - t;
+        const yr =
+          xOut[ri];
 
-          if (t > 4 || bt > 4) {
+        const bSign =
+          coloredParity === 0
+            ? 1
+            : -1;
+
+        for (
+          let t = 1;
+          t < tokenRange;
+          t++
+        ) {
+          const bt =
+            tokenRange - t;
+
+          if (
+            t > 4 ||
+            bt > 4
+          ) {
             continue;
           }
 
-          const AAbs = gen_size(t);
-          const BAbs = gen_size(bt);
+          const AAbs =
+            genSizeNeg(t)
+              .map(
+                ([repA, a]) => [
+                  repA,
+                  sneg(a),
+                ]
+              );
+
+          const BAbs =
+            bSign === 1
+              ? genSize(bt)
+              : genSizeNeg(bt)
+                  .map(
+                    ([repB, b]) => [
+                      repB,
+                      sneg(b),
+                    ]
+                  );
 
           let B1Base;
           let B2Base;
 
-          if (zeroIndex !== -1) {
-            const y0 = xOut[zeroIndex];
+          if (
+            zeroIndex !== -1
+          ) {
+            const y0 =
+              xOut[zeroIndex];
 
-            B1Base = BAbs.filter(
-              b0 => disp(sdiv(1, bSign * b0)) === y0,
-            );
+            B1Base =
+              BAbs.filter(
+                ([, b0]) => {
+                  const b =
+                    bSign === 1
+                      ? b0
+                      : sneg(b0);
 
-            B2Base = BAbs.filter(
-              b0 => disp(bSign * b0) === y0,
-            );
+                  return (
+                    disp(
+                      sdiv(
+                        1n,
+                        b
+                      )
+                    ) === y0
+                  );
+                }
+              );
+
+            B2Base =
+              BAbs.filter(
+                ([, b0]) => {
+                  const b =
+                    bSign === 1
+                      ? b0
+                      : sneg(b0);
+
+                  return (
+                    disp(b) === y0
+                  );
+                }
+              );
           } else {
             B1Base = BAbs;
             B2Base = BAbs;
           }
 
-          if (B1Base.length === 0 && B2Base.length === 0) {
+          if (
+            B1Base.length === 0 &&
+            B2Base.length === 0
+          ) {
             continue;
           }
 
           const useBByPowAndMul =
-            sym === "" || sym === "~" || sym === "~-";
+            sym === "" ||
+            sym === "~" ||
+            sym === "~-";
 
-          for (const aAbs of AAbs) {
-            const negativeA = -aAbs;
-            const pl = spow(negativeA, sx[li]);
-            const pr = spow(negativeA, sx[ri]);
+          for (
+            const [repA, aAbs]
+            of AAbs
+          ) {
+            const negativeA =
+              sneg(aAbs);
+
+            const pl =
+              spow(
+                negativeA,
+                sx[li]
+              );
+
+            const pr =
+              spow(
+                negativeA,
+                sx[ri]
+              );
 
             const canFilterByEndpoint =
-              typeof pl === "number" &&
-              typeof pr === "number" &&
-              Number.isFinite(pl) &&
-              Number.isFinite(pr) &&
-              pl !== 0 &&
-              pr !== 0 &&
-              (pl > 0) === (pr > 0);
+              isFiniteLuaNumber(pl) &&
+              isFiniteLuaNumber(pr) &&
+              !isZero(pl) &&
+              !isZero(pr) &&
+              (
+                (pl > 0) ===
+                (pr > 0)
+              );
 
             let B1;
             let B2;
 
-            if (canFilterByEndpoint) {
-              const pMin = Math.min(Math.abs(pl), Math.abs(pr));
-              const pMax = Math.max(Math.abs(pl), Math.abs(pr));
-
-              const b1Low = pMax / LIMIT;
-              const b1High = pMin;
-
-              B1 = B1Base
-                .filter(
-                  b0 =>
-                    b1Low <= b0 &&
-                    b0 <= b1High &&
-                    disp(sdiv(pl, bSign * b0)) === yl &&
-                    disp(sdiv(pr, bSign * b0)) === yr,
-                )
-                .map(b0 => bSign * b0);
-
-              if (useBByPowAndMul) {
-                const b2DivLow = pMax;
-                const b2DivHigh = LIMIT * pMin;
-
-                const b2MulLow = 1 / pMin;
-                const b2MulHigh = LIMIT / pMax;
-
-                B2 = B2Base
-                  .filter(
-                    b0 =>
-                      (
-                        b2DivLow <= b0 &&
-                        b0 <= b2DivHigh &&
-                        disp(sdiv(bSign * b0, pl)) === yl &&
-                        disp(sdiv(bSign * b0, pr)) === yr
-                      ) ||
-                      (
-                        b2MulLow <= b0 &&
-                        b0 <= b2MulHigh &&
-                        disp(smul(pl, bSign * b0)) === yl &&
-                        disp(smul(pr, bSign * b0)) === yr
-                      ),
+            if (
+              canFilterByEndpoint
+            ) {
+              const pMin =
+                Math.min(
+                  Math.abs(
+                    toFloat(pl)
+                  ),
+                  Math.abs(
+                    toFloat(pr)
                   )
-                  .map(b0 => bSign * b0);
+                );
+
+              const pMax =
+                Math.max(
+                  Math.abs(
+                    toFloat(pl)
+                  ),
+                  Math.abs(
+                    toFloat(pr)
+                  )
+                );
+
+              const b1Low =
+                pMax / LIMIT;
+
+              const b1High =
+                pMin;
+
+              B1 =
+                B1Base
+                  .filter(
+                    ([, b0]) => {
+                      const b =
+                        bSign === 1
+                          ? b0
+                          : sneg(b0);
+
+                      return (
+                        b1Low <= b0 &&
+                        b0 <= b1High &&
+                        disp(
+                          sdiv(
+                            pl,
+                            b
+                          )
+                        ) === yl &&
+                        disp(
+                          sdiv(
+                            pr,
+                            b
+                          )
+                        ) === yr
+                      );
+                    }
+                  )
+                  .map(
+                    ([repB, b0]) => [
+                      repB,
+                      bSign === 1
+                        ? b0
+                        : sneg(b0),
+                    ]
+                  );
+
+              if (
+                useBByPowAndMul
+              ) {
+                const b2DivLow =
+                  pMax;
+
+                const b2DivHigh =
+                  LIMIT * pMin;
+
+                const b2MulLow =
+                  1 / pMin;
+
+                const b2MulHigh =
+                  LIMIT / pMax;
+
+                B2 =
+                  B2Base
+                    .filter(
+                      ([, b0]) => {
+                        const b =
+                          bSign === 1
+                            ? b0
+                            : sneg(b0);
+
+                        return (
+                          (
+                            b2DivLow <=
+                              b0 &&
+                            b0 <=
+                              b2DivHigh &&
+                            disp(
+                              sdiv(
+                                b,
+                                pl
+                              )
+                            ) === yl &&
+                            disp(
+                              sdiv(
+                                b,
+                                pr
+                              )
+                            ) === yr
+                          ) ||
+                          (
+                            b2MulLow <=
+                              b0 &&
+                            b0 <=
+                              b2MulHigh &&
+                            disp(
+                              smul(
+                                pl,
+                                b
+                              )
+                            ) === yl &&
+                            disp(
+                              smul(
+                                pr,
+                                b
+                              )
+                            ) === yr
+                          )
+                        );
+                      }
+                    )
+                    .map(
+                      ([repB, b0]) => [
+                        repB,
+                        bSign === 1
+                          ? b0
+                          : sneg(b0),
+                      ]
+                    );
               } else {
                 B2 = [];
               }
             } else {
-              B1 = B1Base.map(b0 => bSign * b0);
-              B2 = useBByPowAndMul
-                ? B2Base.map(b0 => bSign * b0)
-                : [];
+              B1 =
+                B1Base.map(
+                  ([repB, b0]) => [
+                    repB,
+                    bSign === 1
+                      ? b0
+                      : sneg(b0),
+                  ]
+                );
+
+              B2 =
+                useBByPowAndMul
+                  ? B2Base.map(
+                      ([repB, b0]) => [
+                        repB,
+                        bSign === 1
+                          ? b0
+                          : sneg(b0),
+                      ]
+                    )
+                  : [];
             }
 
-            if (B1.length === 0 && B2.length === 0) {
+            if (
+              B1.length === 0 &&
+              B2.length === 0
+            ) {
               continue;
             }
 
-            const powVals = sx.map(x => spow(negativeA, x));
-            let repBase = null;
+            const powVals =
+              sx.map(
+                x =>
+                  spow(
+                    negativeA,
+                    x
+                  )
+              );
 
-            for (const b of B1) {
+            const repBase =
+              `(${repA})`;
+
+            for (
+              const [repB, b]
+              of B1
+            ) {
               let good = true;
 
-              for (let i = 0; i < powVals.length; i++) {
-                if (disp(sdiv(powVals[i], b)) !== xOut[i]) {
+              for (
+                let i = 0;
+                i < powVals.length;
+                i++
+              ) {
+                if (
+                  disp(
+                    sdiv(
+                      powVals[i],
+                      b
+                    )
+                  ) !==
+                  xOut[i]
+                ) {
                   good = false;
                   break;
                 }
               }
 
               if (good) {
-                if (repBase === null) {
-                  repBase = `(${formatConstant(t, negativeA)})`;
-                }
-
-                finish(
-                  `${repBase}^${sym}x/${formatConstant(bt, b)}`,
+                drop(
+                  `${repBase}^${sym}x/${repB}`
                 );
               }
 
-              reportProgress(token, sym);
+              reportProgress(
+                token,
+                sym
+              );
             }
 
-            for (const b of B2) {
+            for (
+              const [repB, b]
+              of B2
+            ) {
               let okDiv = true;
               let okMul = true;
 
-              for (let i = 0; i < powVals.length; i++) {
-                const p = powVals[i];
-                const y = xOut[i];
+              for (
+                let i = 0;
+                i < powVals.length;
+                i++
+              ) {
+                const p =
+                  powVals[i];
 
-                if (okDiv && disp(sdiv(b, p)) !== y) {
+                const y =
+                  xOut[i];
+
+                if (
+                  okDiv &&
+                  disp(
+                    sdiv(
+                      b,
+                      p
+                    )
+                  ) !== y
+                ) {
                   okDiv = false;
                 }
 
-                if (okMul && disp(smul(p, b)) !== y) {
+                if (
+                  okMul &&
+                  disp(
+                    smul(
+                      p,
+                      b
+                    )
+                  ) !== y
+                ) {
                   okMul = false;
                 }
 
-                if (!okDiv && !okMul) {
+                if (
+                  !okDiv &&
+                  !okMul
+                ) {
                   break;
                 }
               }
 
-              let result = null;
-
               if (okDiv) {
-                result = "div";
+                drop(
+                  `${repB}/${repBase}^${sym}x`
+                );
               } else if (okMul) {
-                result = "mul";
+                drop(
+                  `${repBase}^${sym}x*${repB}`
+                );
               }
 
-              if (result !== null) {
-                if (repBase === null) {
-                  repBase = `(${formatConstant(t, negativeA)})`;
-                }
-
-                const repB = formatConstant(bt, b);
-
-                if (result === "div") {
-                  finish(`${repB}/${repBase}^${sym}x`);
-                } else {
-                  finish(`${repBase}^${sym}x*${repB}`);
-                }
-              }
-
-              reportProgress(token, sym);
+              reportProgress(
+                token,
+                sym
+              );
             }
           }
         }
       }
 
-      // ------------------------------------------------------
-      // a^x%b
-      // ------------------------------------------------------
+      // (a+x)^b / (a-x)^b
+      tokenRange =
+        token - 4;
 
-      tokenRange = token - symLen - 3;
+      if (
+        !quick &&
+        (
+          sym === "" ||
+          sym === "-"
+        ) &&
+        tokenRange >= 2
+      ) {
+        const logLimit =
+          Math.log(LIMIT);
 
-      ok =
-        tokenRange >= 2 &&
-        (zeroIndex === -1 || xOut[zeroIndex] === 1) &&
-        (domNonnegative || domNonpositive);
+        const allSxInt =
+          sx.every(
+            x =>
+              typeof x ===
+              "bigint"
+          );
 
-      if (quick) {
-        ok = ok && !isDense && zeroRatio < 0.5;
-      }
+        let generalALow = null;
+        let forbidden = null;
 
-      if (ok) {
-        for (let t = 1; t < tokenRange; t++) {
-          const bt = tokenRange - t;
+        if (allSxInt) {
+          generalALow =
+            coloredIdx
+              .map(
+                i =>
+                  1n -
+                  sx[i]
+              )
+              .reduce(
+                (a, b) =>
+                  a > b
+                    ? a
+                    : b
+              );
 
-          if (t > 4 || bt > 4) {
+          const intervals =
+            coloredIdx
+              .map(
+                i => [
+                  -1n - sx[i],
+                  1n - sx[i],
+                ]
+              )
+              .sort(
+                (a, b) =>
+                  a[0] < b[0]
+                    ? -1
+                    : a[0] >
+                        b[0]
+                      ? 1
+                      : 0
+              );
+
+          forbidden = [];
+
+          for (
+            const [lo, hi]
+            of intervals
+          ) {
+            if (
+              forbidden.length >
+                0 &&
+              lo <
+                forbidden[
+                  forbidden.length -
+                    1
+                ][1]
+            ) {
+              if (
+                hi >
+                forbidden[
+                  forbidden.length -
+                    1
+                ][1]
+              ) {
+                forbidden[
+                  forbidden.length -
+                    1
+                ][1] = hi;
+              }
+            } else {
+              forbidden.push([
+                lo,
+                hi,
+              ]);
+            }
+          }
+        }
+
+        for (
+          let t = 1;
+          t < tokenRange;
+          t++
+        ) {
+          const bt =
+            tokenRange - t;
+
+          if (
+            t > 4 ||
+            bt > 4
+          ) {
             continue;
           }
 
-          const A = domNonnegative
-            ? gen_size(t).filter(a => a > 1)
-            : gen_size(t).filter(a => a < 1);
+          const A =
+            genSize(t);
 
-          const BBase = gen_size(bt).filter(b => b > maxOut);
+          const B =
+            genSize(bt);
 
-          for (const a of A) {
-            const apx = sx.map(x => spow(a, x));
+          const BEven =
+            B.filter(
+              ([, b]) =>
+                isEvenInteger(b)
+            );
+
+          for (
+            const [repA, a]
+            of A
+          ) {
+            const linearSafe =
+              typeof a ===
+                "bigint" &&
+              allSxInt &&
+              sx.every(
+                x =>
+                  INT_MIN <=
+                    a + x &&
+                  a + x <=
+                    INT_MAX
+              );
+
+            let generalPossible =
+              true;
+
+            let evenPossible =
+              true;
+
+            if (linearSafe) {
+              generalPossible =
+                a >=
+                generalALow;
+
+              evenPossible =
+                !forbidden.some(
+                  ([lo, hi]) =>
+                    lo < a &&
+                    a < hi
+                );
+
+              if (
+                !generalPossible &&
+                !evenPossible
+              ) {
+                continue;
+              }
+            }
+
+            const bases =
+              sx.map(
+                x =>
+                  sadd(
+                    a,
+                    x
+                  )
+              );
+
+            const coloredBases =
+              coloredIdx.map(
+                i =>
+                  bases[i]
+              );
+
+            if (
+              coloredBases.some(
+                base =>
+                  !isFiniteLuaNumber(
+                    base
+                  ) ||
+                  absLua(base) < 1
+              )
+            ) {
+              continue;
+            }
+
+            if (
+              coloredBases.some(
+                base =>
+                  base < 0
+              )
+            ) {
+              generalPossible =
+                false;
+            } else {
+              evenPossible =
+                false;
+            }
+
+            const candidateB = [];
+            const seenB =
+              new Set();
+
+            if (generalPossible) {
+              let bLow = 0;
+              let bHigh = Infinity;
+              let possible = true;
+
+              for (
+                let i = 0;
+                i < bases.length;
+                i++
+              ) {
+                const base =
+                  bases[i];
+
+                const color =
+                  xOut[i];
+
+                if (color > 0) {
+                  if (
+                    !isFiniteLuaNumber(
+                      base
+                    ) ||
+                    base < 1
+                  ) {
+                    possible = false;
+                    break;
+                  }
+
+                  if (
+                    isOne(base)
+                  ) {
+                    if (
+                      color !== 1
+                    ) {
+                      possible = false;
+                      break;
+                    }
+
+                    continue;
+                  }
+
+                  const logBase =
+                    Math.log(
+                      toFloat(base)
+                    );
+
+                  bLow =
+                    Math.max(
+                      bLow,
+                      Math.log(color) /
+                        logBase
+                    );
+
+                  bHigh =
+                    Math.min(
+                      bHigh,
+                      logLimit /
+                        logBase
+                    );
+                } else {
+                  if (
+                    isOne(base)
+                  ) {
+                    possible = false;
+                    break;
+                  }
+
+                  if (base > 1) {
+                    bLow =
+                      Math.max(
+                        bLow,
+                        logLimit /
+                          Math.log(
+                            toFloat(
+                              base
+                            )
+                          )
+                      );
+                  }
+                }
+
+                if (
+                  bLow >= bHigh
+                ) {
+                  possible = false;
+                  break;
+                }
+              }
+
+              if (possible) {
+                for (
+                  const [repB, b]
+                  of B
+                ) {
+                  if (
+                    bLow <= b &&
+                    b < bHigh
+                  ) {
+                    seenB.add(
+                      numericKey(b)
+                    );
+
+                    candidateB.push([
+                      repB,
+                      b,
+                    ]);
+                  }
+                }
+              }
+            }
+
+            if (
+              evenPossible &&
+              BEven.length > 0
+            ) {
+              let bLow = 0;
+              let bHigh = Infinity;
+              let possible = true;
+
+              const magnitudeToColor =
+                new Map();
+
+              for (
+                let i = 0;
+                i < bases.length;
+                i++
+              ) {
+                const magnitude =
+                  absLua(
+                    bases[i]
+                  );
+
+                const color =
+                  xOut[i];
+
+                const key =
+                  numericKey(
+                    magnitude
+                  );
+
+                if (
+                  magnitudeToColor.has(
+                    key
+                  ) &&
+                  magnitudeToColor.get(
+                    key
+                  ) !== color
+                ) {
+                  possible = false;
+                  break;
+                }
+
+                magnitudeToColor.set(
+                  key,
+                  color
+                );
+
+                if (color > 0) {
+                  if (
+                    !isFiniteLuaNumber(
+                      magnitude
+                    ) ||
+                    magnitude < 1
+                  ) {
+                    possible = false;
+                    break;
+                  }
+
+                  if (
+                    isOne(
+                      magnitude
+                    )
+                  ) {
+                    if (
+                      color !== 1
+                    ) {
+                      possible = false;
+                      break;
+                    }
+
+                    continue;
+                  }
+
+                  const logMagnitude =
+					Math.log(
+					  Number(magnitude)
+					);
+
+                  bLow =
+                    Math.max(
+                      bLow,
+                      Math.log(color) /
+                        logMagnitude
+                    );
+
+                  bHigh =
+                    Math.min(
+                      bHigh,
+                      logLimit /
+                        logMagnitude
+                    );
+                } else {
+                  if (
+                    isOne(
+                      magnitude
+                    )
+                  ) {
+                    possible = false;
+                    break;
+                  }
+
+                  if (
+                    magnitude > 1
+                  ) {
+                    bLow =
+                      Math.max(
+                        bLow,
+                        logLimit /
+                          Math.log(
+                            Number(
+                              magnitude
+                            )
+                          )
+                      );
+                  }
+                }
+
+                if (
+                  bLow >= bHigh
+                ) {
+                  possible = false;
+                  break;
+                }
+              }
+
+              if (possible) {
+                for (
+                  const [repB, b]
+                  of BEven
+                ) {
+                  const key =
+                    numericKey(b);
+
+                  if (
+                    bLow <= b &&
+                    b < bHigh &&
+                    !seenB.has(key)
+                  ) {
+                    seenB.add(key);
+
+                    candidateB.push([
+                      repB,
+                      b,
+                    ]);
+                  }
+                }
+              }
+            }
+
+            if (
+              candidateB.length ===
+              0
+            ) {
+              continue;
+            }
+
+            const inner =
+              sym === ""
+                ? `${repA}+x`
+                : `${repA}-x`;
+
+            for (
+              const [repB, b]
+              of candidateB
+            ) {
+              let good = true;
+
+              for (
+                let i = 0;
+                i < bases.length;
+                i++
+              ) {
+                if (
+                  disp(
+                    spow(
+                      bases[i],
+                      b
+                    )
+                  ) !==
+                  xOut[i]
+                ) {
+                  good = false;
+                  break;
+                }
+              }
+
+              if (good) {
+                drop(
+                  `(${inner})^${repB}`
+                );
+              }
+
+              reportProgress(
+                token,
+                sym
+              );
+            }
+          }
+        }
+      }
+
+      // a^x%b
+      tokenRange =
+        token -
+        symLen -
+        3;
+
+      ok =
+        tokenRange >= 2 &&
+        (
+          zeroIndex === -1 ||
+          xOut[zeroIndex] === 1
+        ) &&
+        (
+          domNonnegative ||
+          domNonpositive
+        );
+
+      if (quick) {
+        ok =
+          ok &&
+          !isDense &&
+          zeroRatio < 0.5;
+      }
+
+      if (ok) {
+        for (
+          let t = 1;
+          t < tokenRange;
+          t++
+        ) {
+          const bt =
+            tokenRange - t;
+
+          if (
+            t > 4 ||
+            bt > 4
+          ) {
+            continue;
+          }
+
+          const A =
+            domNonnegative
+              ? genSize(t)
+                  .filter(
+                    ([, a]) =>
+                      a > 1
+                  )
+              : genSize(t)
+                  .filter(
+                    ([, a]) =>
+                      a < 1
+                  );
+
+          const BBase =
+            genSize(bt)
+              .filter(
+                ([, b]) =>
+                  b > maxOut
+              );
+
+          for (
+            const [repA, a]
+            of A
+          ) {
+            const apx =
+              sx.map(
+                x =>
+                  spow(
+                    a,
+                    x
+                  )
+              );
+
             let bMax = Infinity;
 
-            for (let i = 0; i < apx.length; i++) {
-              const y = apx[i];
+            for (
+              let i = 0;
+              i < apx.length;
+              i++
+            ) {
+              const y =
+                apx[i];
 
-              if (disp(y) !== xOut[i] && y < bMax) {
+              if (
+                disp(y) !==
+                  xOut[i] &&
+                y < bMax
+              ) {
                 bMax = y;
               }
             }
 
-            for (const b of BBase) {
+            for (
+              const [repB, b]
+              of BBase
+            ) {
               if (b > bMax) {
                 continue;
               }
 
               let good = true;
 
-              for (let i = 0; i < apx.length; i++) {
-                if (disp(smod(apx[i], b)) !== xOut[i]) {
+              for (
+                let i = 0;
+                i < apx.length;
+                i++
+              ) {
+                if (
+                  disp(
+                    smod(
+                      apx[i],
+                      b
+                    )
+                  ) !==
+                  xOut[i]
+                ) {
                   good = false;
                   break;
                 }
               }
 
               if (good) {
-                finish(
-                  `${formatConstant(t, a)}^${sym}x%` +
-                  `${formatConstant(bt, b)}`,
+                drop(
+                  `${repA}^${sym}x%${repB}`
                 );
               }
 
-              reportProgress(token, sym);
+              reportProgress(
+                token,
+                sym
+              );
             }
           }
         }
       }
 
-      // ------------------------------------------------------
       // x/a%b
-      // ------------------------------------------------------
+      const absorbSign =
+        sym === "-" ||
+        sym === "-~";
 
-      const absorbSign = sym === "-" || sym === "-~";
-      const outputSym = absorbSign ? sym.slice(1) : sym;
-      const denominatorSign = absorbSign ? -1 : 1;
+      const outputSym =
+        absorbSign
+          ? sym.slice(1)
+          : sym;
 
-      tokenRange = token - outputSym.length - 3;
-      ok = tokenRange >= 2;
+      const denominatorSign =
+        absorbSign
+          ? -1
+          : 1;
+
+      tokenRange =
+        token -
+        outputSym.length -
+        3;
+
+      ok =
+        tokenRange >= 2;
 
       if (quick) {
         ok =
@@ -1278,105 +3165,229 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
       } else {
         ok =
           ok &&
-          (zeroIndex === -1 || xOut[zeroIndex] === 0);
+          (
+            zeroIndex === -1 ||
+            xOut[zeroIndex] === 0
+          );
       }
 
       if (ok) {
-        for (let t = 1; t < tokenRange; t++) {
-          const bt = tokenRange - t;
+        for (
+          let t = 1;
+          t < tokenRange;
+          t++
+        ) {
+          const bt =
+            tokenRange - t;
 
-          if (t > 4 || bt > 4) {
+          if (
+            t > 4 ||
+            bt > 4
+          ) {
             continue;
           }
 
-          const A = gen_size(t).filter(a => 0 < a && a < 1);
-          const BBase = gen_size(bt).filter(b => b > maxOut);
+          let A;
 
-          for (const a of A) {
-            const xda = sx.map(x => sdiv(x, a));
+          if (
+            denominatorSign === 1
+          ) {
+            A =
+              genSize(t)
+                .filter(
+                  ([, a]) =>
+                    0 < a &&
+                    a < 1
+                );
+          } else {
+            A =
+              genSizeNeg(t)
+                .filter(
+                  ([, a]) =>
+                    0 <
+                      -toFloat(a) &&
+                    -toFloat(a) <
+                      1
+                )
+                .map(
+                  ([repA, a]) => [
+                    repA,
+                    sneg(a),
+                  ]
+                );
+          }
+
+          const BBase =
+            genSize(bt)
+              .filter(
+                ([, b]) =>
+                  b > maxOut
+              );
+
+          for (
+            const [repA, a]
+            of A
+          ) {
+            const xda =
+              sx.map(
+                x =>
+                  sdiv(
+                    x,
+                    a
+                  )
+              );
+
             let bMax = Infinity;
 
-            for (let i = 0; i < xda.length; i++) {
-              const y = xda[i];
+            for (
+              let i = 0;
+              i < xda.length;
+              i++
+            ) {
+              const y =
+                xda[i];
 
               if (
                 y >= 0 &&
-                disp(y) !== xOut[i] &&
+                disp(y) !==
+                  xOut[i] &&
                 y < bMax
               ) {
                 bMax = y;
               }
             }
 
-            if (bMax <= maxOut) {
+            if (
+              bMax <= maxOut
+            ) {
               continue;
             }
 
-            for (const b of BBase) {
+            for (
+              const [repB, b]
+              of BBase
+            ) {
               if (b > bMax) {
                 continue;
               }
 
               let good = true;
 
-              for (let i = 0; i < xda.length; i++) {
-                if (disp(smod(xda[i], b)) !== xOut[i]) {
+              for (
+                let i = 0;
+                i < xda.length;
+                i++
+              ) {
+                if (
+                  disp(
+                    smod(
+                      xda[i],
+                      b
+                    )
+                  ) !==
+                  xOut[i]
+                ) {
                   good = false;
                   break;
                 }
               }
 
               if (good) {
-                const denominator = denominatorSign * a;
-
-                finish(
-                  `${outputSym}x/` +
-                  `${formatConstant(t, denominator)}%` +
-                  `${formatConstant(bt, b)}`,
+                drop(
+                  `${outputSym}x/${repA}%${repB}`
                 );
               }
 
-              reportProgress(token, sym);
+              reportProgress(
+                token,
+                sym
+              );
             }
           }
         }
       }
 
-      // ------------------------------------------------------
       // f(x/a), f(x*a)
-      // ------------------------------------------------------
+      tokenRange =
+        token -
+        symLen -
+        4;
 
-      tokenRange = token - symLen - 4;
-      ok = 1 <= tokenRange && tokenRange <= 4;
+      ok =
+        1 <= tokenRange &&
+        tokenRange <= 4;
 
       if (quick) {
-        ok = ok && !isDense && zeroRatio >= 0.5;
+        ok =
+          ok &&
+          !isDense &&
+          zeroRatio >= 0.5;
       }
 
       if (ok) {
-        const A = gen_size(tokenRange);
+        const A =
+          genSize(
+            tokenRange
+          );
 
-        for (const [symF, f] of FUNC_LIST) {
+        const onlyZeroOne =
+          xOut.every(
+            y =>
+              y === 0 ||
+              y === 1
+          );
+
+        for (
+          const [symF, f]
+          of FUNC_LIST_SCAN
+        ) {
           if (
-            (symF === "sin" || symF === "cos") &&
-            !xOut.every(y => y === 0 || y === 1)
+            !onlyZeroOne &&
+            (
+              symF === "sin" ||
+              symF === "cos"
+            )
           ) {
             continue;
           }
 
-          for (const a of A) {
-            let repA = null;
-
-            for (const mode of [0, 1]) {
+          for (
+            const [repA, a]
+            of A
+          ) {
+            for (
+              const mode
+              of [0, 1]
+            ) {
               const vals = [];
               let valid = true;
               let innerOp;
 
               if (mode === 0) {
-                for (const x of sx) {
-                  const v = f(sdiv(x, a));
+                for (
+                  const x
+                  of sx
+                ) {
+                  let v;
 
-                  if (!Number.isFinite(v)) {
+                  try {
+                    v =
+                      f(
+                        sdiv(
+                          x,
+                          a
+                        )
+                      );
+                  } catch {
+                    valid = false;
+                    break;
+                  }
+
+                  if (
+                    !Number.isFinite(
+                      v
+                    )
+                  ) {
                     valid = false;
                     break;
                   }
@@ -1386,10 +3397,30 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
 
                 innerOp = "/";
               } else {
-                for (const x of sx) {
-                  const v = f(smul(x, a));
+                for (
+                  const x
+                  of sx
+                ) {
+                  let v;
 
-                  if (!Number.isFinite(v)) {
+                  try {
+                    v =
+                      f(
+                        smul(
+                          x,
+                          a
+                        )
+                      );
+                  } catch {
+                    valid = false;
+                    break;
+                  }
+
+                  if (
+                    !Number.isFinite(
+                      v
+                    )
+                  ) {
                     valid = false;
                     break;
                   }
@@ -1406,49 +3437,82 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
 
               let good = true;
 
-              for (let i = 0; i < vals.length; i++) {
-                if (disp(vals[i]) !== xOut[i]) {
+              for (
+                let i = 0;
+                i < vals.length;
+                i++
+              ) {
+                if (
+                  disp(
+                    vals[i]
+                  ) !==
+                  xOut[i]
+                ) {
                   good = false;
                   break;
                 }
               }
 
               if (good) {
-                if (repA === null) {
-                  repA = formatConstant(tokenRange, a);
-                }
-
-                finish(`${symF}(${sym}x${innerOp}${repA})`);
+                drop(
+                  `${symF}(${sym}x${innerOp}${repA})`
+                );
               }
 
-              reportProgress(token, sym);
+              reportProgress(
+                token,
+                sym
+              );
             }
           }
         }
       }
 
-      // ------------------------------------------------------
       // f(x)*a, f(x)/a
-      // ------------------------------------------------------
+      tokenRange =
+        token - 4;
 
-      tokenRange = token - 4;
-      ok = sym === "" && 1 <= tokenRange && tokenRange <= 4;
+      ok =
+        sym === "" &&
+        1 <= tokenRange &&
+        tokenRange <= 4;
 
       if (quick) {
-        ok = ok && !isDense && zeroRatio >= 0.5;
+        ok =
+          ok &&
+          !isDense &&
+          zeroRatio >= 0.5;
       }
 
       if (ok) {
-        const A = gen_size(tokenRange);
+        const A =
+          genSize(
+            tokenRange
+          );
 
-        for (const [symF, f] of FUNC_LIST) {
+        for (
+          const [symF, f]
+          of FUNC_LIST_SCAN
+        ) {
           const vals = [];
           let valid = true;
 
-          for (const x of xIn) {
-            const v = f(x);
+          for (
+            const x
+            of xIn
+          ) {
+            let v;
 
-            if (!Number.isFinite(v)) {
+            try {
+              v = f(x);
+            } catch {
+              valid = false;
+              break;
+            }
+
+            if (
+              !Number.isFinite(v)
+            ) {
               valid = false;
               break;
             }
@@ -1460,18 +3524,29 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
             continue;
           }
 
-          const first = vals[coloredIdx[0]];
+          const first =
+            vals[
+              coloredIdx[0]
+            ];
 
           if (first === 0) {
             continue;
           }
 
-          const fPos = first > 0;
+          const fPos =
+            first > 0;
 
-          for (let k = 1; k < coloredIdx.length; k++) {
-            const value = vals[coloredIdx[k]];
+          for (
+            const i
+            of coloredIdx.slice(1)
+          ) {
+            const v =
+              vals[i];
 
-            if (value === 0 || (value > 0) !== fPos) {
+            if (
+              v === 0 ||
+              (v > 0) !== fPos
+            ) {
               valid = false;
               break;
             }
@@ -1481,125 +3556,239 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
             continue;
           }
 
-          const useNegativeA = !fPos;
-          const absVals = coloredIdx.map(index => Math.abs(vals[index]));
+          const absVals =
+            coloredIdx.map(
+              i =>
+                Math.abs(
+                  vals[i]
+                )
+            );
 
-          const divLow = arrayMax(absVals) / LIMIT;
-          const divHigh = arrayMin(absVals);
+          const divLow =
+            Math.max(
+              ...absVals
+            ) / LIMIT;
 
-          let mulLow = -Infinity;
-          let mulHigh = Infinity;
+          const divHigh =
+            Math.min(
+              ...absVals
+            );
 
-          for (const value of absVals) {
-            mulLow = Math.max(mulLow, 1 / value);
-            mulHigh = Math.min(mulHigh, LIMIT / value);
-          }
+          const mulLow =
+            Math.max(
+              ...absVals.map(
+                v => 1 / v
+              )
+            );
 
-          if (divLow > divHigh && mulLow > mulHigh) {
+          const mulHigh =
+            Math.min(
+              ...absVals.map(
+                v => LIMIT / v
+              )
+            );
+
+          if (
+            divLow > divHigh &&
+            mulLow > mulHigh
+          ) {
             continue;
           }
 
-          for (const a0 of A) {
-            const tryDiv = divLow <= a0 && a0 <= divHigh;
-            const tryMul = mulLow <= a0 && a0 <= mulHigh;
+          const A2 =
+            fPos
+              ? A
+              : genSizeNeg(
+                  tokenRange
+                );
 
-            if (!tryDiv && !tryMul) {
+          for (
+            const [repA, a]
+            of A2
+          ) {
+            const a0 =
+			  Number(
+			    absLua(a)
+			  );
+
+            const tryDiv =
+              divLow <= a0 &&
+              a0 <= divHigh;
+
+            const tryMul =
+              mulLow <= a0 &&
+              a0 <= mulHigh;
+
+            if (
+              !tryDiv &&
+              !tryMul
+            ) {
               continue;
             }
-
-            const a = useNegativeA ? -a0 : a0;
-            let repA = null;
 
             if (tryDiv) {
               let good = true;
 
-              for (let i = 0; i < vals.length; i++) {
-                if (disp(sdiv(vals[i], a)) !== xOut[i]) {
+              for (
+                let i = 0;
+                i < vals.length;
+                i++
+              ) {
+                if (
+                  disp(
+                    sdiv(
+                      vals[i],
+                      a
+                    )
+                  ) !==
+                  xOut[i]
+                ) {
                   good = false;
                   break;
                 }
               }
 
               if (good) {
-                if (repA === null) {
-                  repA = formatConstant(tokenRange, a);
-                }
-
-                finish(`${symF}(x)/${repA}`);
+                drop(
+                  `${symF}(x)/${repA}`
+                );
               }
             }
 
             if (tryMul) {
               let good = true;
 
-              for (let i = 0; i < vals.length; i++) {
-                if (disp(smul(vals[i], a)) !== xOut[i]) {
+              for (
+                let i = 0;
+                i < vals.length;
+                i++
+              ) {
+                if (
+                  disp(
+                    smul(
+                      vals[i],
+                      a
+                    )
+                  ) !==
+                  xOut[i]
+                ) {
                   good = false;
                   break;
                 }
               }
 
               if (good) {
-                if (repA === null) {
-                  repA = formatConstant(tokenRange, a);
-                }
-
-                finish(`${symF}(x)*${repA}`);
+                drop(
+                  `${symF}(x)*${repA}`
+                );
               }
             }
 
-            reportProgress(token, sym);
+            reportProgress(
+              token,
+              sym
+            );
           }
         }
       }
 
-      // ------------------------------------------------------
-      // a>>x&b, a>>x|b, a>>x~b,
-      // a<<x&b, a<<x|b, a<<x~b
-      // ------------------------------------------------------
-
-      tokenRange = token - symLen - 3;
+      // a>>x&b, a>>x|b, a>>x~b, a<<x&b, a<<x|b, a<<x~b
+      tokenRange =
+        token -
+        symLen -
+        3;
 
       if (
         tokenRange >= 2 &&
         isInt &&
-        (sym === "" || sym === "~" || sym === "~-")
+        (
+          sym === "" ||
+          sym === "~" ||
+          sym === "~-"
+        )
       ) {
-        for (let t = 1; t < tokenRange; t++) {
-          const bt = tokenRange - t;
+        for (
+          let t = 1;
+          t < tokenRange;
+          t++
+        ) {
+          const bt =
+            tokenRange - t;
 
-          if (t > 4 || bt > 4) {
+          if (
+            t > 4 ||
+            bt > 4
+          ) {
             continue;
           }
 
-          const A = gen_int(t);
-          const B = gen_int(bt);
+          const A =
+            genInt(t);
+
+          const B =
+            genInt(bt);
 
           const shiftList = [
             ["<<", lshift],
             [">>", rshift],
           ];
 
-          for (const [symOp1, op1] of shiftList) {
-            for (const a of A) {
-              const asx = sx.map(x => op1(a, x));
+          for (
+            const [symOp1, op1]
+            of shiftList
+          ) {
+            for (
+              const a
+              of A
+            ) {
+              const asx =
+                sx.map(
+                  x =>
+                    op1(
+                      a,
+                      x
+                    )
+                );
 
-              for (const [symOp2, op2] of BIT_LIST) {
-                for (const b of B) {
+              for (
+                const [symOp2, op2]
+                of BIT_LIST
+              ) {
+                for (
+                  const b
+                  of B
+                ) {
                   let good = true;
 
-                  for (let i = 0; i < asx.length; i++) {
-                    if (disp(op2(asx[i], b)) !== xOut[i]) {
+                  for (
+                    let i = 0;
+                    i < asx.length;
+                    i++
+                  ) {
+                    if (
+                      disp(
+                        op2(
+                          asx[i],
+                          b
+                        )
+                      ) !==
+                      xOut[i]
+                    ) {
                       good = false;
                       break;
                     }
                   }
 
                   if (good) {
-                    finish(`${a}${symOp1}${sym}x${symOp2}${b}`);
+                    drop(
+                      `${a}${symOp1}${sym}x${symOp2}${b}`
+                    );
                   }
 
-                  reportProgress(token, sym);
+                  reportProgress(
+                    token,
+                    sym
+                  );
                 }
               }
             }
@@ -1607,42 +3796,85 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
         }
       }
 
-      // ------------------------------------------------------
       // f(x/a)/b, f(x/a)*b, f(x*a)/b, f(x*a)*b
-      // ------------------------------------------------------
+      tokenRange =
+        token -
+        symLen -
+        5;
 
-      tokenRange = token - symLen - 5;
-      ok = tokenRange >= 2;
+      ok =
+        tokenRange >= 2;
 
       if (quick) {
-        ok = ok && !isDense && zeroRatio >= 0.5;
+        ok =
+          ok &&
+          !isDense &&
+          zeroRatio >= 0.5;
       }
 
       if (ok) {
-        for (let t = 1; t < tokenRange; t++) {
-          const bt = tokenRange - t;
+        for (
+          let t = 1;
+          t < tokenRange;
+          t++
+        ) {
+          const bt =
+            tokenRange - t;
 
-          if (t > 4 || bt > 4) {
+          if (
+            t > 4 ||
+            bt > 4
+          ) {
             continue;
           }
 
-          const A = gen_size(t);
-          const B = gen_size(bt);
+          const A =
+            genSize(t);
 
-          for (const [symF, f] of FUNC_LIST) {
-            for (const a of A) {
-              let repA = null;
+          const B =
+            genSize(bt);
 
-              for (const mode of [0, 1]) {
+          for (
+            const [symF, f]
+            of FUNC_LIST_SCAN
+          ) {
+            for (
+              const [repA, a]
+              of A
+            ) {
+              for (
+                const mode
+                of [0, 1]
+              ) {
                 const vals = [];
                 let modeOk = true;
                 let innerOp;
 
                 if (mode === 0) {
-                  for (const x of sx) {
-                    const v = f(sdiv(x, a));
+                  for (
+                    const x
+                    of sx
+                  ) {
+                    let v;
 
-                    if (!Number.isFinite(v)) {
+                    try {
+                      v =
+                        f(
+                          sdiv(
+                            x,
+                            a
+                          )
+                        );
+                    } catch {
+                      modeOk = false;
+                      break;
+                    }
+
+                    if (
+                      !Number.isFinite(
+                        v
+                      )
+                    ) {
                       modeOk = false;
                       break;
                     }
@@ -1652,10 +3884,30 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
 
                   innerOp = "/";
                 } else {
-                  for (const x of sx) {
-                    const v = f(smul(x, a));
+                  for (
+                    const x
+                    of sx
+                  ) {
+                    let v;
 
-                    if (!Number.isFinite(v)) {
+                    try {
+                      v =
+                        f(
+                          smul(
+                            x,
+                            a
+                          )
+                        );
+                    } catch {
+                      modeOk = false;
+                      break;
+                    }
+
+                    if (
+                      !Number.isFinite(
+                        v
+                      )
+                    ) {
                       modeOk = false;
                       break;
                     }
@@ -1670,19 +3922,29 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
                   continue;
                 }
 
-                const first = vals[coloredIdx[0]];
+                const first =
+                  vals[
+                    coloredIdx[0]
+                  ];
 
                 if (first === 0) {
                   continue;
                 }
 
-                const fPos = first > 0;
+                const fPos =
+                  first > 0;
 
-                for (let k = 1; k < coloredIdx.length; k++) {
-                  const index = coloredIdx[k];
-                  const value = vals[index];
+                for (
+                  const i
+                  of coloredIdx.slice(1)
+                ) {
+                  const v =
+                    vals[i];
 
-                  if (value === 0 || (value > 0) !== fPos) {
+                  if (
+                    v === 0 ||
+                    (v > 0) !== fPos
+                  ) {
                     modeOk = false;
                     break;
                   }
@@ -1692,41 +3954,75 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
                   continue;
                 }
 
-                const useNegativeB = !fPos;
-                const absVals = coloredIdx.map(
-                  index => Math.abs(vals[index]),
-                );
+                const absVals =
+                  coloredIdx.map(
+                    i =>
+                      Math.abs(
+                        vals[i]
+                      )
+                  );
 
-                const divLow = arrayMax(absVals) / LIMIT;
-                const divHigh = arrayMin(absVals);
+                const divLow =
+                  Math.max(
+                    ...absVals
+                  ) / LIMIT;
 
-                let mulLow = -Infinity;
-                let mulHigh = Infinity;
+                const divHigh =
+                  Math.min(
+                    ...absVals
+                  );
 
-                for (const value of absVals) {
-                  mulLow = Math.max(mulLow, 1 / value);
-                  mulHigh = Math.min(mulHigh, LIMIT / value);
-                }
+                const mulLow =
+                  Math.max(
+                    ...absVals.map(
+                      v => 1 / v
+                    )
+                  );
 
-                if (divLow > divHigh && mulLow > mulHigh) {
+                const mulHigh =
+                  Math.min(
+                    ...absVals.map(
+                      v =>
+                        LIMIT / v
+                    )
+                  );
+
+                if (
+                  divLow > divHigh &&
+                  mulLow > mulHigh
+                ) {
                   continue;
                 }
 
-                for (const b0 of B) {
-                  const tryDiv = divLow <= b0 && b0 <= divHigh;
-                  const tryMul = mulLow <= b0 && b0 <= mulHigh;
+                const B2 =
+                  fPos
+                    ? B
+                    : genSizeNeg(bt);
 
-                  if (!tryDiv && !tryMul) {
+                for (
+                  const [repB, b]
+                  of B2
+                ) {
+                  const b0 =
+					Number(
+					  absLua(b)
+					);
+
+                  const tryDiv =
+                    divLow <= b0 &&
+                    b0 <= divHigh;
+
+                  const tryMul =
+                    mulLow <= b0 &&
+                    b0 <= mulHigh;
+
+                  if (
+                    !tryDiv &&
+                    !tryMul
+                  ) {
                     continue;
                   }
 
-                  const b = useNegativeB ? -b0 : b0;
-
-                  if (repA === null) {
-                    repA = formatConstant(t, a);
-                  }
-
-                  const repB = formatConstant(bt, b);
                   const inner =
                     innerOp === "/"
                       ? `${sym}x/${repA}`
@@ -1735,34 +4031,65 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
                   if (tryDiv) {
                     let good = true;
 
-                    for (let i = 0; i < vals.length; i++) {
-                      if (disp(sdiv(vals[i], b)) !== xOut[i]) {
+                    for (
+                      let i = 0;
+                      i < vals.length;
+                      i++
+                    ) {
+                      if (
+                        disp(
+                          sdiv(
+                            vals[i],
+                            b
+                          )
+                        ) !==
+                        xOut[i]
+                      ) {
                         good = false;
                         break;
                       }
                     }
 
                     if (good) {
-                      finish(`${symF}(${inner})/${repB}`);
+                      drop(
+                        `${symF}(${inner})/${repB}`
+                      );
                     }
                   }
 
                   if (tryMul) {
                     let good = true;
 
-                    for (let i = 0; i < vals.length; i++) {
-                      if (disp(smul(vals[i], b)) !== xOut[i]) {
+                    for (
+                      let i = 0;
+                      i < vals.length;
+                      i++
+                    ) {
+                      if (
+                        disp(
+                          smul(
+                            vals[i],
+                            b
+                          )
+                        ) !==
+                        xOut[i]
+                      ) {
                         good = false;
                         break;
                       }
                     }
 
                     if (good) {
-                      finish(`${symF}(${inner})*${repB}`);
+                      drop(
+                        `${symF}(${inner})*${repB}`
+                      );
                     }
                   }
 
-                  reportProgress(token, sym);
+                  reportProgress(
+                    token,
+                    sym
+                  );
                 }
               }
             }
@@ -1772,48 +4099,155 @@ function runExpressionScan(rawXIn, rawXOut, maxToken, quick) {
     }
   }
 
-  finishNotFound();
+  if (foundCount === 0) {
+    postMessage({
+      type: "not-found",
+    });
+  }
 }
 
 // ------------------------------------------------------------
 // Message entry point
 // ------------------------------------------------------------
 
-self.addEventListener("message", event => {
-  const data = event.data;
+self.addEventListener(
+  "message",
+  event => {
+    const data = event.data;
 
-  if (!data || data.type !== "run") {
-    return;
-  }
-
-  const payload = data.payload || {};
-
-  try {
-    const maxToken = Number(payload.maxToken);
-
-    if (!Number.isInteger(maxToken) || maxToken < 3) {
-      throw new Error(
-        "Max token must be an integer greater than or equal to 3.",
-      );
-    }
-
-    runExpressionScan(
-      Array.isArray(payload.xIn) ? payload.xIn : [],
-      Array.isArray(payload.xOut) ? payload.xOut : [],
-      maxToken,
-      Boolean(payload.quick),
-    );
-  } catch (error) {
-    if (error instanceof ScanFinished) {
+    if (
+      !data ||
+      data.type !== "run"
+    ) {
       return;
     }
 
-    postMessage({
-      type: "error",
-      message:
-        error && error.stack
-          ? String(error.stack)
-          : String(error),
-    });
+    const payload =
+      data.payload || {};
+
+    try {
+      const maxToken =
+        Number(
+          payload.maxToken
+        );
+
+      const maxFound =
+        Number(
+          payload.maxFound ?? 3
+        );
+
+      const maxDecimalFractionDigits =
+        Number(
+          payload
+            .maxDecimalFractionDigits ??
+            17
+        );
+
+      const maxHexFractionDigits =
+        Number(
+          payload
+            .maxHexFractionDigits ??
+            17
+        );
+
+      const quick =
+        Boolean(
+          payload.quick
+        );
+
+      if (
+        !Number.isInteger(
+          maxToken
+        ) ||
+        maxToken < 3
+      ) {
+        throw new Error(
+          "Max token must be an integer greater than or equal to 3."
+        );
+      }
+
+      if (
+        !Number.isInteger(
+          maxFound
+        ) ||
+        maxFound < 1
+      ) {
+        throw new Error(
+          "Max results must be a positive integer."
+        );
+      }
+
+      if (
+        !Number.isInteger(
+          maxDecimalFractionDigits
+        ) ||
+        maxDecimalFractionDigits < 1
+      ) {
+        throw new Error(
+          "Decimal fraction digits must be a positive integer."
+        );
+      }
+
+      if (
+        !Number.isInteger(
+          maxHexFractionDigits
+        ) ||
+        maxHexFractionDigits < 1
+      ) {
+        throw new Error(
+          "Hex fraction digits must be a positive integer."
+        );
+      }
+
+      configureGenSize({
+        maxDecimalFractionDigits,
+        maxHexFractionDigits,
+      });
+
+      configureGenSizeQuick({
+        maxDecimalFractionDigits,
+        maxHexFractionDigits,
+      });
+
+      try {
+        runExpressionScan(
+          Array.isArray(
+            payload.xIn
+          )
+            ? payload.xIn
+            : [],
+          Array.isArray(
+            payload.xOut
+          )
+            ? payload.xOut
+            : [],
+          maxToken,
+          quick,
+          maxFound,
+        );
+      } catch (error) {
+        if (
+          !(
+            error instanceof
+            Found
+          )
+        ) {
+          throw error;
+        }
+      }
+
+      finishRun();
+    } catch (error) {
+      postMessage({
+        type: "error",
+        message:
+          error &&
+          error.stack
+            ? String(
+                error.stack
+              )
+            : String(error),
+      });
+    }
   }
-});
+);
