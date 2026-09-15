@@ -10,17 +10,37 @@ const addNextRowButton = document.getElementById("addNextRowButton");
 const allClearButton = document.getElementById("allClearButton");
 const runButton = document.getElementById("runButton");
 const stopButton = document.getElementById("stopButton");
+
 const maxTokenInput = document.getElementById("maxTokenInput");
 const maxFoundInput = document.getElementById("maxFoundInput");
-const maxDecimalFractionDigitsInput = document.getElementById("maxDecimalFractionDigitsInput");
-const maxHexFractionDigitsInput = document.getElementById("maxHexFractionDigitsInput");
+const maxDecimalFractionDigitsInput = document.getElementById(
+  "maxDecimalFractionDigitsInput"
+);
+const maxHexFractionDigitsInput = document.getElementById(
+  "maxHexFractionDigitsInput"
+);
+
+const expressionFamilyScanInput = document.getElementById(
+  "expressionFamilyScanInput"
+);
+const symbolicRegressionInput = document.getElementById(
+  "symbolicRegressionInput"
+);
+const scanModeOptions = document.getElementById("scanModeOptions");
+const symbolicRegressionOptions = document.getElementById(
+  "symbolicRegressionOptions"
+);
+const stateLimitInput = document.getElementById("stateLimitInput");
+
 const resultOutput = document.getElementById("resultOutput");
 const copyResultButton = document.getElementById("copyResultButton");
 
 let activeWorker = null;
 let foundExpressions = [];
+let scanWarnings = [];
 let currentProgress = null;
 let notFound = false;
+
 
 // ------------------------------------------------------------
 // Input rows
@@ -34,6 +54,7 @@ function createInput(value) {
   return input;
 }
 
+
 function renumberRows() {
   const rows = Array.from(pairsBody.querySelectorAll("tr"));
 
@@ -41,6 +62,7 @@ function renumberRows() {
     row.querySelector(".row-number").textContent = String(index + 1);
   });
 }
+
 
 function addRow(xInValue = 0, xOutValue = 0) {
   const tr = document.createElement("tr");
@@ -66,10 +88,12 @@ function addRow(xInValue = 0, xOutValue = 0) {
   removeButton.type = "button";
   removeButton.className = "danger";
   removeButton.textContent = "Remove";
+
   removeButton.addEventListener("click", () => {
     tr.remove();
     renumberRows();
   });
+
   tdAction.appendChild(removeButton);
 
   tr.appendChild(tdIndex);
@@ -80,6 +104,7 @@ function addRow(xInValue = 0, xOutValue = 0) {
   pairsBody.appendChild(tr);
   renumberRows();
 }
+
 
 function addNextRow() {
   const rows = Array.from(pairsBody.querySelectorAll("tr"));
@@ -101,9 +126,11 @@ function addNextRow() {
   addRow(lastX + 1, 0);
 }
 
+
 function clearAllRows() {
   pairsBody.replaceChildren();
 }
+
 
 function readPairs() {
   const rows = Array.from(pairsBody.querySelectorAll("tr"));
@@ -138,25 +165,49 @@ function readPairs() {
   return { xIn, xOut };
 }
 
+
+// ------------------------------------------------------------
+// Options
+// ------------------------------------------------------------
+
 function readQuickMode() {
-  const selected = document.querySelector('input[name="scanMode"]:checked');
+  const selected = document.querySelector(
+    'input[name="scanMode"]:checked'
+  );
+
   return selected !== null && selected.value === "quick";
 }
+
 
 function readOptions() {
   const maxToken = Number(maxTokenInput.value);
   const maxFound = Number(maxFoundInput.value);
-  const maxDecimalFractionDigits = Number(maxDecimalFractionDigitsInput.value);
-  const maxHexFractionDigits = Number(maxHexFractionDigitsInput.value);
+  const maxDecimalFractionDigits = Number(
+    maxDecimalFractionDigitsInput.value
+  );
+  const maxHexFractionDigits = Number(
+    maxHexFractionDigitsInput.value
+  );
 
-  if (!Number.isInteger(maxToken) || maxToken < 3) {
+  const expressionFamilyScan = expressionFamilyScanInput.checked;
+  const symbolicRegression = symbolicRegressionInput.checked;
+
+  if (!expressionFamilyScan && !symbolicRegression) {
     throw new Error(
-      "Max token must be an integer greater than or equal to 3.",
+      "Enable at least one search method."
+    );
+  }
+
+  if (!Number.isInteger(maxToken) || maxToken < 2) {
+    throw new Error(
+      "Max token must be an integer greater than or equal to 2."
     );
   }
 
   if (!Number.isInteger(maxFound) || maxFound < 1) {
-    throw new Error("Max results must be a positive integer.");
+    throw new Error(
+      "Max results must be a positive integer."
+    );
   }
 
   if (
@@ -164,7 +215,7 @@ function readOptions() {
     maxDecimalFractionDigits < 1
   ) {
     throw new Error(
-      "Decimal fraction digits must be a positive integer.",
+      "Decimal fraction digits must be a positive integer."
     );
   }
 
@@ -173,26 +224,63 @@ function readOptions() {
     maxHexFractionDigits < 1
   ) {
     throw new Error(
-      "Hex fraction digits must be a positive integer.",
+      "Hex fraction digits must be a positive integer."
     );
+  }
+
+  let stateLimit = null;
+
+  if (symbolicRegression) {
+    stateLimit = Number(stateLimitInput.value);
+
+    if (
+      !Number.isSafeInteger(stateLimit) ||
+      stateLimit < 1
+    ) {
+      throw new Error(
+        "State limit per layer must be a positive integer."
+      );
+    }
   }
 
   return {
     maxToken,
-    quick: readQuickMode(),
     maxFound,
     maxDecimalFractionDigits,
     maxHexFractionDigits,
+    expressionFamilyScan,
+    symbolicRegression,
+    quick:
+      expressionFamilyScan
+        ? readQuickMode()
+        : false,
+    stateLimit,
   };
 }
+
 
 // ------------------------------------------------------------
 // UI state
 // ------------------------------------------------------------
 
+function syncMethodOptionState(scanning = false) {
+  expressionFamilyScanInput.disabled = scanning;
+  symbolicRegressionInput.disabled = scanning;
+
+  scanModeOptions.disabled =
+    scanning ||
+    !expressionFamilyScanInput.checked;
+
+  symbolicRegressionOptions.disabled =
+    scanning ||
+    !symbolicRegressionInput.checked;
+}
+
+
 function setScanningState(scanning) {
   runButton.disabled = scanning;
   addRowButton.disabled = scanning;
+
   maxTokenInput.disabled = scanning;
   maxFoundInput.disabled = scanning;
   maxDecimalFractionDigitsInput.disabled = scanning;
@@ -210,12 +298,9 @@ function setScanningState(scanning) {
     stopButton.disabled = !scanning;
   }
 
-  const modeInputs = document.querySelectorAll('input[name="scanMode"]');
-
-  for (const input of modeInputs) {
-    input.disabled = scanning;
-  }
+  syncMethodOptionState(scanning);
 }
+
 
 function disposeWorker() {
   if (activeWorker !== null) {
@@ -224,14 +309,21 @@ function disposeWorker() {
   }
 }
 
+
 function formatProgressMessage(data) {
   const tokenPart = `token=${data.token}`;
 
-  if (data.symbol === null || data.symbol === undefined) {
+  if (
+    data.symbol === null ||
+    data.symbol === undefined
+  ) {
     return `Scanning... ${tokenPart}`;
   }
 
-  const symbol = data.symbol === "" ? "x" : data.symbol;
+  const symbol =
+    data.symbol === ""
+      ? "x"
+      : data.symbol;
 
   return (
     `Scanning... ${tokenPart}, ` +
@@ -239,30 +331,46 @@ function formatProgressMessage(data) {
   );
 }
 
+
 function renderOutput() {
+  const lines = [];
+
   if (foundExpressions.length > 0) {
-    const lines = foundExpressions.slice();
-
-    if (currentProgress !== null) {
-      lines.push("", currentProgress);
-    }
-
-    resultOutput.textContent = lines.join("\n");
-    return;
+    lines.push(...foundExpressions);
   }
 
-  if (notFound) {
-    resultOutput.textContent = "Not Found";
-    return;
+  if (scanWarnings.length > 0) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+
+    lines.push(...scanWarnings);
+  }
+
+  if (notFound && foundExpressions.length === 0) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+
+    lines.push("Not Found");
   }
 
   if (currentProgress !== null) {
-    resultOutput.textContent = currentProgress;
+    if (lines.length > 0) {
+      lines.push("");
+    }
+
+    lines.push(currentProgress);
+  }
+
+  if (lines.length === 0) {
+    resultOutput.textContent = "Ready.";
     return;
   }
 
-  resultOutput.textContent = "Ready.";
+  resultOutput.textContent = lines.join("\n");
 }
+
 
 // ------------------------------------------------------------
 // Worker control
@@ -275,6 +383,7 @@ function startScan(xIn, xOut, options) {
   activeWorker = worker;
 
   foundExpressions = [];
+  scanWarnings = [];
   currentProgress = "Scanning...";
   notFound = false;
 
@@ -289,13 +398,30 @@ function startScan(xIn, xOut, options) {
     const data = event.data || {};
 
     if (data.type === "progress") {
-      currentProgress = formatProgressMessage(data);
+      currentProgress =
+        formatProgressMessage(data);
+
       renderOutput();
       return;
     }
 
     if (data.type === "result") {
-      foundExpressions.push(String(data.expression));
+      foundExpressions.push(
+        String(data.expression)
+      );
+
+      renderOutput();
+      return;
+    }
+
+    if (data.type === "warning") {
+      scanWarnings.push(
+        String(
+          data.message ||
+          "Scan warning."
+        )
+      );
+
       renderOutput();
       return;
     }
@@ -303,12 +429,14 @@ function startScan(xIn, xOut, options) {
     if (data.type === "not-found") {
       notFound = true;
       currentProgress = null;
+
       renderOutput();
       return;
     }
 
     if (data.type === "done") {
       currentProgress = null;
+
       renderOutput();
       disposeWorker();
       setScanningState(false);
@@ -317,7 +445,13 @@ function startScan(xIn, xOut, options) {
 
     if (data.type === "error") {
       currentProgress = null;
-      resultOutput.textContent = String(data.message || "Worker error.");
+
+      resultOutput.textContent =
+        String(
+          data.message ||
+          "Worker error."
+        );
+
       disposeWorker();
       setScanningState(false);
     }
@@ -328,9 +462,13 @@ function startScan(xIn, xOut, options) {
       return;
     }
 
-    const message = event.message || "Worker error.";
+    const message =
+      event.message ||
+      "Worker error.";
+
     currentProgress = null;
-    resultOutput.textContent = String(message);
+    resultOutput.textContent =
+      String(message);
 
     disposeWorker();
     setScanningState(false);
@@ -341,14 +479,31 @@ function startScan(xIn, xOut, options) {
     payload: {
       xIn,
       xOut,
+
       maxToken: options.maxToken,
-      quick: options.quick,
       maxFound: options.maxFound,
-      maxDecimalFractionDigits: options.maxDecimalFractionDigits,
-      maxHexFractionDigits: options.maxHexFractionDigits,
+
+      maxDecimalFractionDigits:
+        options.maxDecimalFractionDigits,
+
+      maxHexFractionDigits:
+        options.maxHexFractionDigits,
+
+      expressionFamilyScan:
+        options.expressionFamilyScan,
+
+      symbolicRegression:
+        options.symbolicRegression,
+
+      quick:
+        options.quick,
+
+      stateLimit:
+        options.stateLimit,
     },
   });
 }
+
 
 // ------------------------------------------------------------
 // Events
@@ -358,13 +513,38 @@ addRowButton.addEventListener("click", () => {
   addRow(0, 0);
 });
 
+
 if (addNextRowButton) {
-  addNextRowButton.addEventListener("click", addNextRow);
+  addNextRowButton.addEventListener(
+    "click",
+    addNextRow
+  );
 }
 
+
 if (allClearButton) {
-  allClearButton.addEventListener("click", clearAllRows);
+  allClearButton.addEventListener(
+    "click",
+    clearAllRows
+  );
 }
+
+
+expressionFamilyScanInput.addEventListener(
+  "change",
+  () => {
+    syncMethodOptionState(false);
+  }
+);
+
+
+symbolicRegressionInput.addEventListener(
+  "change",
+  () => {
+    syncMethodOptionState(false);
+  }
+);
+
 
 if (stopButton) {
   stopButton.addEventListener("click", () => {
@@ -376,42 +556,90 @@ if (stopButton) {
     currentProgress = null;
 
     if (foundExpressions.length > 0) {
+      const lines = [
+        ...foundExpressions,
+      ];
+
+      if (scanWarnings.length > 0) {
+        lines.push(
+          "",
+          ...scanWarnings
+        );
+      }
+
+      lines.push("", "Stopped.");
+
       resultOutput.textContent =
-        foundExpressions.join("\n") + "\n\nStopped.";
+        lines.join("\n");
     } else {
-      resultOutput.textContent = "Stopped.";
+      const lines = [];
+
+      if (scanWarnings.length > 0) {
+        lines.push(
+          ...scanWarnings,
+          ""
+        );
+      }
+
+      lines.push("Stopped.");
+
+      resultOutput.textContent =
+        lines.join("\n");
     }
 
     setScanningState(false);
   });
 }
 
+
 if (copyResultButton) {
-  copyResultButton.addEventListener("click", async () => {
-    const text = resultOutput.textContent;
+  copyResultButton.addEventListener(
+    "click",
+    async () => {
+      const text =
+        resultOutput.textContent;
 
-    try {
-      await navigator.clipboard.writeText(text);
-      copyResultButton.textContent = "Copied";
+      try {
+        await navigator.clipboard.writeText(
+          text
+        );
 
-      setTimeout(() => {
-        copyResultButton.textContent = "Copy";
-      }, 1000);
-    } catch {
-      copyResultButton.textContent = "Failed";
+        copyResultButton.textContent =
+          "Copied";
 
-      setTimeout(() => {
-        copyResultButton.textContent = "Copy";
-      }, 1000);
+        setTimeout(() => {
+          copyResultButton.textContent =
+            "Copy";
+        }, 1000);
+
+      } catch {
+        copyResultButton.textContent =
+          "Failed";
+
+        setTimeout(() => {
+          copyResultButton.textContent =
+            "Copy";
+        }, 1000);
+      }
     }
-  });
+  );
 }
+
 
 runButton.addEventListener("click", () => {
   try {
-    const { xIn, xOut } = readPairs();
-    const options = readOptions();
-    startScan(xIn, xOut, options);
+    const { xIn, xOut } =
+      readPairs();
+
+    const options =
+      readOptions();
+
+    startScan(
+      xIn,
+      xOut,
+      options
+    );
+
   } catch (error) {
     resultOutput.textContent =
       error && error.stack
@@ -419,6 +647,14 @@ runButton.addEventListener("click", () => {
         : String(error);
   }
 });
+
+
+// ------------------------------------------------------------
+// Initial UI state
+// ------------------------------------------------------------
+
+syncMethodOptionState(false);
+
 
 // ------------------------------------------------------------
 // Default sample
