@@ -21,6 +21,24 @@ class LuaRuntimeError extends Error {
 }
 
 
+const VALUE_KEY_FLOAT_TAG = 1n << 64n;
+const VALUE_KEY_BUFFER = new ArrayBuffer(8);
+const VALUE_KEY_VIEW = new DataView(VALUE_KEY_BUFFER);
+
+function valueKey(v) {
+  if (typeof v === "bigint") {
+    return BigInt.asUintN(64, checkInt(v));
+  }
+
+  if (typeof v === "number") {
+    VALUE_KEY_VIEW.setFloat64(0, v, false);
+    return VALUE_KEY_FLOAT_TAG | VALUE_KEY_VIEW.getBigUint64(0, false);
+  }
+
+  throw new LuaRuntimeError("number expected");
+}
+
+
 // ------------------------------------------------------------
 // Integer / float conversion
 // ------------------------------------------------------------
@@ -253,6 +271,15 @@ function floatPow(a, b) {
   if (b === 2) {
     return a * a;
   }
+
+  if (a === 1) {
+    return 1;
+  }
+
+  if (a === -1 && (b === Infinity || b === -Infinity)) {
+    return 1;
+  }
+
   return Math.pow(a, b);
 }
 
@@ -705,6 +732,7 @@ function disp(x) {
 }
 
 
+
 const FUNC_LIST = [
   ["sin", luaSin],
   ["cos", luaCos],
@@ -789,7 +817,22 @@ function needParenRight(outer, symOp) {
     return false;
   }
 
+  // prefix unary の連鎖
+  if (
+    (symOp === "u-" || symOp === "u~") &&
+    (outer === "u-" || outer === "u~")
+  ) {
+    return false;
+  }
+
+  // Luaでは a^-x, a^~x のように、
+  // 累乗の右辺へ単項演算子を括弧なしで置ける。
+  if (symOp === "^" && (outer === "u-" || outer === "u~")) {
+    return false;
+  }
+
   const parent = getOp(symOp);
+
   if (child < parent) {
     return false;
   }
@@ -809,13 +852,25 @@ function needParenRight(outer, symOp) {
 
 // ------------------------------------------------------------
 // Operator precedence
+//
+// 0: 何もなし        x, f(x)
+// 1: 累乗            ^
+// 2: 単項演算        -x, ~x
+// 3: *, /, //, %
+// 4: +, -
+// 5: <<, >>
+// 6: &
+// 7: ~               XOR
+// 8: |
+//
+// 数字が小さいほど強く結合する。
 // ------------------------------------------------------------
 
 const OP_PRIORITY = {
   "": 0,
-  "u-": 1,
-  "u~": 1,
-  "^": 2,
+  "^": 1,
+  "u-": 2,
+  "u~": 2,
   "*": 3,
   "/": 3,
   "//": 3,
@@ -865,6 +920,7 @@ Object.assign(globalThis, {
   UINT_MOD,
   UINT_MASK,
   LuaRuntimeError,
+  valueKey,
   SPECIAL_CONSTANTS,
   SPECIAL_CONSTANT_MAP,
   toFloat,
@@ -940,6 +996,7 @@ if (typeof module !== "undefined" && module.exports) {
     UINT_MOD,
     UINT_MASK,
     LuaRuntimeError,
+    valueKey,
     SPECIAL_CONSTANTS,
     SPECIAL_CONSTANT_MAP,
     toFloat,
