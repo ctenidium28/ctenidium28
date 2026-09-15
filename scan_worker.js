@@ -25,6 +25,13 @@ class Found extends Error {
   }
 }
 
+class StateLimit extends Error {
+  constructor() {
+    super("Symbolic regression state limit reached.");
+    this.name = "StateLimit";
+  }
+}
+
 let workCounter = 0;
 let foundCount = 0;
 let found = false;
@@ -286,10 +293,6 @@ function hasDuplicateNumbers(values) {
   return false;
 }
 
-function formatInteger(value) {
-  return String(value);
-}
-
 const FUNC_LIST_SCAN = [
   ["sin", luaSin],
   ["cos", luaCos],
@@ -312,6 +315,9 @@ function runExpressionScan(
   maxToken,
   quick,
   maxFound,
+  expressionFamilyScan,
+  symbolicRegression,
+  stateLimit,
 ) {
   let xIn = rawXIn.map(
     normalizeInputValue
@@ -356,6 +362,15 @@ function runExpressionScan(
   found = false;
   maxFoundCurrent = maxFound;
   workCounter = 0;
+
+  if (
+    xIn.every(
+      (x, i) => disp(x) === xOut[i]
+    )
+  ) {
+    drop("x");
+    throw new Found();
+  }
 
   const numColor =
     new Set(xOut).size;
@@ -526,8 +541,382 @@ function runExpressionScan(
     return out;
   }
 
+  // ------------------------------------------------------------
+  // Bottom-up symbolic regression
+  // ------------------------------------------------------------
+
+  let states = null;
+  let seen = null;
+
+  function mixSemanticHash(hash, word) {
+    hash ^= word;
+    return Math.imul(hash, 0x01000193) >>> 0;
+  }
+
+  function semanticHash(keys, outer) {
+    let hash = 0x811c9dc5;
+
+    for (const key of keys) {
+      hash = mixSemanticHash(hash, Number(key & 0xffffffffn));
+      hash = mixSemanticHash(hash, Number((key >> 32n) & 0xffffffffn));
+      hash = mixSemanticHash(hash, Number((key >> 64n) & 0xffffffffn));
+    }
+
+    for (let i = 0; i < outer.length; i++) {
+      hash = mixSemanticHash(hash, outer.charCodeAt(i));
+    }
+
+    return hash;
+  }
+
+  function sameSemanticState(state, keys, outer) {
+    if (state.outer !== outer || state.value.length !== keys.length) {
+      return false;
+    }
+
+    for (let i = 0; i < keys.length; i++) {
+      if (valueKey(state.value[i]) !== keys[i]) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  function seenContainsOrAdd(state, keys) {
+    const hash = semanticHash(keys, state.outer);
+    const existing = seen.get(hash);
+
+    if (existing === undefined) {
+      seen.set(hash, state);
+      return false;
+    }
+
+    if (Array.isArray(existing)) {
+      for (const other of existing) {
+        if (sameSemanticState(other, keys, state.outer)) {
+          return true;
+        }
+      }
+
+      existing.push(state);
+      return false;
+    }
+
+    if (sameSemanticState(existing, keys, state.outer)) {
+      return true;
+    }
+
+    seen.set(hash, [existing, state]);
+    return false;
+  }
+
+  function insertBusr(token, expr, value, outer) {
+    reportProgress(token, "SR");
+
+    let matches = true;
+    const keys = [];
+    const colors = new Map();
+
+    for (let i = 0; i < value.length; i++) {
+      const y = value[i];
+      const key = valueKey(y);
+      const color = xOut[i];
+
+      keys.push(key);
+
+      if (disp(y) !== color) {
+        matches = false;
+      }
+
+      const oldColor = colors.get(key);
+
+      if (oldColor === undefined) {
+        colors.set(key, color);
+      } else if (oldColor !== color) {
+        return;
+      }
+    }
+
+    if (matches) {
+      drop(expr);
+      return;
+    }
+
+    if (token >= maxToken) {
+      return;
+    }
+
+    const state = { expr, value, outer };
+
+    if (seenContainsOrAdd(state, keys)) {
+      return;
+    }
+
+    states[token].push(state);
+
+    if (states[token].length >= stateLimit) {
+      throw new StateLimit();
+    }
+  }
+
+  function tryInsertBusr(token, expr, valueFactory, outer) {
+    try {
+      insertBusr(token, expr, valueFactory(), outer);
+    } catch (error) {
+      if (error instanceof LuaRuntimeError) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  function runBusrLayer(token) {
+    // Unary operators
+    for (const [symOp, newOuter, op] of UN_OPS) {
+      let preToken = token - 1;
+
+      if (0 < preToken && preToken <= maxToken) {
+        for (const state of states[preToken]) {
+          const { expr, value, outer } = state;
+
+          if (outer === "u-" && symOp === "-") {
+            continue;
+          }
+
+          if (!needParenRight(outer, newOuter)) {
+            tryInsertBusr(
+              token,
+              `${symOp}${expr}`,
+              () => value.map(op),
+              newOuter,
+            );
+          }
+        }
+      }
+
+      preToken = token - 2;
+
+      if (0 < preToken && preToken <= maxToken) {
+        for (const state of states[preToken]) {
+          const { expr, value, outer } = state;
+
+          if (outer === "u-" && symOp === "-") {
+            continue;
+          }
+
+          if (needParenRight(outer, newOuter)) {
+            tryInsertBusr(
+              token,
+              `${symOp}(${expr})`,
+              () => value.map(op),
+              newOuter,
+            );
+          }
+        }
+      }
+    }
+
+    // Binary operators. Python BUSR currently uses only 1-token integers here.
+    const t = 1;
+
+    for (const [repA, a] of genInt(t)) {
+      // a - expr, represented by concatenating a with an existing unary-negative state.
+      let preToken = token - t;
+
+      if (0 < preToken && preToken <= maxToken) {
+        for (const state of states[preToken]) {
+          const { expr, value, outer } = state;
+
+          if (outer === "u-") {
+            tryInsertBusr(
+              token,
+              `${repA}${expr}`,
+              () => value.map(y => sadd(a, y)),
+              "-",
+            );
+          }
+        }
+      }
+
+      for (const [symOp, op] of BI_OPS) {
+        // expr OP a / a OP expr
+        preToken = token - t - 1;
+
+        if (0 < preToken && preToken <= maxToken) {
+          for (const state of states[preToken]) {
+            const { expr, value, outer } = state;
+
+            // expr OP a
+            if (
+              !needParenLeft(outer, symOp) &&
+              !(outer === symOp && isAssociative(symOp, value, a)) &&
+              !(outer === "u-" && symOp === "+")
+            ) {
+              if (symOp === "+" && repA.startsWith("-")) {
+                tryInsertBusr(
+                  token,
+                  `${expr}${repA}`,
+                  () => value.map(y => op(y, a)),
+                  "-",
+                );
+              } else {
+                tryInsertBusr(
+                  token,
+                  `${expr}${symOp}${repA}`,
+                  () => value.map(y => op(y, a)),
+                  symOp,
+                );
+              }
+            }
+
+            if (COMMUTATIVE_OPS.has(symOp)) {
+              continue;
+            }
+
+            // a OP expr
+            if (
+              !needParenRight(outer, symOp) &&
+              !(RIGHT_ASSOCIATIVE_OPS.has(symOp) && repA.startsWith("-")) &&
+              !(outer === symOp && isAssociative(symOp, value, a)) &&
+              !(outer === "u-" && symOp === "+")
+            ) {
+              tryInsertBusr(
+                token,
+                `${repA}${symOp}${expr}`,
+                () => value.map(y => op(a, y)),
+                symOp,
+              );
+            }
+          }
+        }
+
+        // (expr) OP a / a OP (expr) / (a) OP expr
+        preToken = token - t - 2;
+
+        if (0 < preToken && preToken <= maxToken) {
+          for (const state of states[preToken]) {
+            const { expr, value, outer } = state;
+
+            // a OP (expr)
+            if (
+              needParenRight(outer, symOp) &&
+              !(RIGHT_ASSOCIATIVE_OPS.has(symOp) && repA.startsWith("-")) &&
+              !(outer === symOp && isAssociative(symOp, value, a)) &&
+              !(outer === "u-" && symOp === "+")
+            ) {
+              tryInsertBusr(
+                token,
+                `${repA}${symOp}(${expr})`,
+                () => value.map(y => op(a, y)),
+                symOp,
+              );
+            }
+
+            // (a) OP expr
+            if (
+              !needParenRight(outer, symOp) &&
+              RIGHT_ASSOCIATIVE_OPS.has(symOp) &&
+              repA.startsWith("-") &&
+              !(outer === symOp && isAssociative(symOp, value, a)) &&
+              !(outer === "u-" && symOp === "+")
+            ) {
+              tryInsertBusr(
+                token,
+                `(${repA})${symOp}${expr}`,
+                () => value.map(y => op(a, y)),
+                symOp,
+              );
+            }
+
+            if (COMMUTATIVE_OPS.has(symOp)) {
+              continue;
+            }
+
+            // (expr) OP a
+            if (
+              needParenLeft(outer, symOp) &&
+              !(outer === symOp && isAssociative(symOp, value, a)) &&
+              !(outer === "u-" && symOp === "+")
+            ) {
+              if (symOp === "+" && repA.startsWith("-")) {
+                tryInsertBusr(
+                  token,
+                  `(${expr})${repA}`,
+                  () => value.map(y => op(y, a)),
+                  "-",
+                );
+              } else {
+                tryInsertBusr(
+                  token,
+                  `(${expr})${symOp}${repA}`,
+                  () => value.map(y => op(y, a)),
+                  symOp,
+                );
+              }
+            }
+          }
+        }
+
+        // (a) OP (expr)
+        preToken = token - t - 3;
+
+        if (0 < preToken && preToken <= maxToken) {
+          for (const state of states[preToken]) {
+            const { expr, value, outer } = state;
+
+            if (
+              needParenRight(outer, symOp) &&
+              RIGHT_ASSOCIATIVE_OPS.has(symOp) &&
+              repA.startsWith("-") &&
+              !(outer === symOp && isAssociative(symOp, value, a)) &&
+              !(outer === "u-" && symOp === "+")
+            ) {
+              tryInsertBusr(
+                token,
+                `(${repA})${symOp}(${expr})`,
+                () => value.map(y => op(a, y)),
+                symOp,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    // Unary functions
+    const preToken = token - 2;
+
+    if (0 < preToken && preToken <= maxToken) {
+      for (const [symF, f] of FUNC_LIST_SCAN) {
+        for (const state of states[preToken]) {
+          tryInsertBusr(
+            token,
+            `${symF}(${state.expr})`,
+            () => state.value.map(f),
+            "",
+          );
+        }
+      }
+    }
+  }
+
+  if (symbolicRegression) {
+    states = Array.from({ length: maxToken + 1 }, () => []);
+    seen = new Map();
+
+    const initialState = {
+      expr: "x",
+      value: xIn,
+      outer: "",
+    };
+
+    states[1].push(initialState);
+    seenContainsOrAdd(initialState, xIn.map(valueKey));
+  }
+
   for (
-    let token = 3;
+    let token = 2;
     token <= maxToken;
     token++
   ) {
@@ -540,6 +929,27 @@ function runExpressionScan(
       null,
       true
     );
+
+    if (symbolicRegression) {
+      try {
+        runBusrLayer(token);
+      } catch (error) {
+        if (error instanceof StateLimit) {
+          postMessage({
+            type: "warning",
+            message:
+              `Symbolic regression token=${token}: ` +
+              `state limit reached (${stateLimit}).`,
+          });
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    if (!expressionFamilyScan) {
+      continue;
+    }
 
     for (
       let si = 0;
@@ -716,14 +1126,7 @@ function runExpressionScan(
         let A;
 
         if (isInt) {
-          A =
-            genInt(1)
-              .map(
-                a => [
-                  formatInteger(a),
-                  a,
-                ]
-              );
+          A = genInt(1);
         } else {
           A =
             genSize(1)
@@ -942,11 +1345,11 @@ function runExpressionScan(
               LIMIT **
               (
                 1 /
-                toFloat(
-                  sx[
-                    sx.length - 1
-                  ]
-                )
+                  toFloat(
+                    sx[
+                      sx.length - 1
+                    ]
+                  )
               );
 
             A =
@@ -1581,7 +1984,7 @@ function runExpressionScan(
           of BIT_LIST
         ) {
           for (
-            const a
+            const [repA, a]
             of genInt(
               tokenRange
             )
@@ -1609,7 +2012,7 @@ function runExpressionScan(
 
             if (good) {
               drop(
-                `${sym}x${symOp}${a}`
+                `${sym}x${symOp}${repA}`
               );
             }
 
@@ -2869,9 +3272,9 @@ function runExpressionScan(
                   }
 
                   const logMagnitude =
-					Math.log(
-					  Number(magnitude)
-					);
+                    Math.log(
+                      Number(magnitude)
+                    );
 
                   bLow =
                     Math.max(
@@ -3607,9 +4010,9 @@ function runExpressionScan(
             of A2
           ) {
             const a0 =
-			  Number(
-			    absLua(a)
-			  );
+              Number(
+                absLua(a)
+              );
 
             const tryDiv =
               divLow <= a0 &&
@@ -3738,7 +4141,7 @@ function runExpressionScan(
             of shiftList
           ) {
             for (
-              const a
+              const [repA, a]
               of A
             ) {
               const asx =
@@ -3755,7 +4158,7 @@ function runExpressionScan(
                 of BIT_LIST
               ) {
                 for (
-                  const b
+                  const [repB, b]
                   of B
                 ) {
                   let good = true;
@@ -3781,7 +4184,7 @@ function runExpressionScan(
 
                   if (good) {
                     drop(
-                      `${a}${symOp1}${sym}x${symOp2}${b}`
+                      `${repA}${symOp1}${sym}x${symOp2}${repB}`
                     );
                   }
 
@@ -4004,9 +4407,9 @@ function runExpressionScan(
                   of B2
                 ) {
                   const b0 =
-					Number(
-					  absLua(b)
-					);
+                    Number(
+                      absLua(b)
+                    );
 
                   const tryDiv =
                     divLow <= b0 &&
@@ -4150,19 +4553,29 @@ self.addEventListener(
             17
         );
 
-      const quick =
-        Boolean(
-          payload.quick
+      const quick = Boolean(payload.quick);
+      const expressionFamilyScan =
+        payload.expressionFamilyScan !== false;
+      const symbolicRegression =
+        payload.symbolicRegression === true;
+      const stateLimit = Number(
+        payload.stateLimit ?? 1_000_000
+      );
+
+      if (!expressionFamilyScan && !symbolicRegression) {
+        throw new Error(
+          "Enable at least one search method."
         );
+      }
 
       if (
         !Number.isInteger(
           maxToken
         ) ||
-        maxToken < 3
+        maxToken < 2
       ) {
         throw new Error(
-          "Max token must be an integer greater than or equal to 3."
+          "Max token must be an integer greater than or equal to 2."
         );
       }
 
@@ -4174,6 +4587,18 @@ self.addEventListener(
       ) {
         throw new Error(
           "Max results must be a positive integer."
+        );
+      }
+
+      if (
+        symbolicRegression &&
+        (
+          !Number.isSafeInteger(stateLimit) ||
+          stateLimit < 1
+        )
+      ) {
+        throw new Error(
+          "State limit per layer must be a positive integer."
         );
       }
 
@@ -4224,6 +4649,9 @@ self.addEventListener(
           maxToken,
           quick,
           maxFound,
+          expressionFamilyScan,
+          symbolicRegression,
+          stateLimit,
         );
       } catch (error) {
         if (
