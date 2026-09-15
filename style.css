@@ -286,6 +286,79 @@ button.danger:disabled:hover {
   margin-top: 16px;
 }
 
+/* Sections inside Advanced options */
+.advanced-section {
+  margin-top: 20px;
+}
+
+.advanced-section + .advanced-section {
+  padding-top: 20px;
+  border-top: 1px solid #30363d;
+}
+
+.advanced-section h3 {
+  margin: 0;
+  color: #e6edf3;
+  font-size: 16px;
+  font-weight: normal;
+}
+
+
+/* On/off option row */
+.toggle-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 180px;
+  color: #9aa7b2;
+}
+
+.toggle-field > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toggle-field input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  accent-color: #238636;
+  cursor: pointer;
+}
+
+.toggle-field input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}
+
+
+/* Reset default fieldset styling */
+fieldset.option-field {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+fieldset.option-field > legend:not(.visually-hidden) {
+  margin-bottom: 6px;
+  padding: 0;
+  color: #9aa7b2;
+}
+
+
+/* Visually indicate disabled method-specific settings */
+fieldset.option-field:disabled {
+  color: #6e7681;
+}
+
+fieldset.option-field:disabled legend {
+  color: #6e7681;
+}
+
 .control-note {
   margin: 12px 0 0;
   color: #8b949e;
