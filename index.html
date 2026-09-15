@@ -49,110 +49,177 @@
       <details class="advanced-options">
         <summary>Advanced options</summary>
 
-        <div class="advanced-options-grid">
-          <label class="field">
-            Max Token
-            <span
-		      class="help-tip"
-		      tabindex="0"
-		      data-tooltip="Maximum token count to search. The scanner checks smaller token counts first and stops after the first token layer that produces a result. Larger values can greatly increase scan time."
-		    >?</span>
-            <input
-              id="maxTokenInput"
-              type="number"
-              min="3"
-              step="1"
-              value="8"
-            >
-          </label>
+        <div class="advanced-section">
+          <h3>Common settings</h3>
 
-          <div class="option-field">
-            Scan mode
-            <span
-		      class="help-tip"
-		      tabindex="0"
-		      data-tooltip="Quick uses a smaller literal set and stronger pruning to prioritize speed. Broad searches a wider candidate set and preserves more numeric distinctions."
-		    >?</span>
+          <div class="advanced-options-grid">
+            <label class="field">
+              Max token
+              <span
+                class="help-tip"
+                tabindex="0"
+                data-tooltip="Maximum token count to search. The scanner checks smaller token counts first and stops after the first token layer that produces a result. Larger values can greatly increase scan time."
+              >?</span>
+              <input
+                id="maxTokenInput"
+                type="number"
+                min="2"
+                step="1"
+                value="8"
+              >
+            </label>
 
-            <fieldset class="scan-mode">
-              <legend class="visually-hidden">Scan mode</legend>
+            <label class="field">
+              Max results
+              <span
+                class="help-tip"
+                tabindex="0"
+                data-tooltip="Maximum number of displayed expressions. Results are displayed immediately. If fewer results are found, the scanner finishes that token layer and then stops."
+              >?</span>
+              <input
+                id="maxFoundInput"
+                type="number"
+                min="1"
+                step="1"
+                value="3"
+              >
+            </label>
+
+            <label class="field">
+              Decimal fraction digits
+              <span
+                class="help-tip"
+                tabindex="0"
+                data-tooltip="Controls the maximum fractional depth used for generated decimal literals such as .0001. Larger values generate more candidates and can increase scan time and memory usage."
+              >?</span>
+              <input
+                id="maxDecimalFractionDigitsInput"
+                type="number"
+                min="1"
+                step="1"
+                value="17"
+              >
+            </label>
+
+            <label class="field">
+              Hex fraction digits
+              <span
+                class="help-tip"
+                tabindex="0"
+                data-tooltip="Controls the maximum number of hexadecimal fractional digits generated for hex literals. Larger values generate more candidates and can increase scan time and memory usage."
+              >?</span>
+              <input
+                id="maxHexFractionDigitsInput"
+                type="number"
+                min="1"
+                step="1"
+                value="17"
+              >
+            </label>
+          </div>
+        </div>
+
+        <div class="advanced-section">
+          <h3>Expression-family scan</h3>
+
+          <div class="advanced-options-grid">
+            <label class="toggle-field">
+              <span>
+                Enable expression-family scan
+                <span
+                  class="help-tip"
+                  tabindex="0"
+                  data-tooltip="Searches a curated set of expression families using specialized pruning."
+                >?</span>
+              </span>
 
               <input
-                id="modeQuick"
-                type="radio"
-                name="scanMode"
-                value="quick"
-              >
-              <label
-                for="modeQuick"
-                title="Prioritizes speed by using stronger heuristic pruning."
-              >
-                Quick
-              </label>
-
-              <input
-                id="modeBroad"
-                type="radio"
-                name="scanMode"
-                value="broad"
+                id="expressionFamilyScanInput"
+                type="checkbox"
                 checked
+                aria-controls="scanModeOptions"
               >
-              <label
-                for="modeBroad"
-                title="Prioritizes coverage by searching a broader candidate set."
+            </label>
+
+            <fieldset id="scanModeOptions" class="option-field">
+              <legend>
+                Scan mode
+              </legend>
+
+              <div class="scan-mode">
+                <input
+                  id="modeQuick"
+                  type="radio"
+                  name="scanMode"
+                  value="quick"
+                >
+                <label
+                  for="modeQuick"
+                  title="Prioritizes speed by using stronger heuristic pruning."
+                >
+                  Quick
+                </label>
+
+                <input
+                  id="modeBroad"
+                  type="radio"
+                  name="scanMode"
+                  value="broad"
+                  checked
+                >
+                <label
+                  for="modeBroad"
+                  title="Prioritizes coverage by searching a broader candidate set."
+                >
+                  Broad
+                </label>
+              </div>
+            </fieldset>
+          </div>
+        </div>
+
+        <div class="advanced-section">
+          <h3>Symbolic regression</h3>
+
+          <div class="advanced-options-grid">
+            <label class="toggle-field">
+              <span>
+                Enable symbolic regression
+                <span
+                  class="help-tip"
+                  tabindex="0"
+                  data-tooltip="Runs bottom-up symbolic regression in addition to the expression-family scan. Expressions are constructed from smaller expressions in increasing token order."
+                >?</span>
+              </span>
+
+              <input
+                id="symbolicRegressionInput"
+                type="checkbox"
+                checked
+                aria-controls="symbolicRegressionOptions"
               >
-                Broad
+            </label>
+
+            <fieldset id="symbolicRegressionOptions" class="option-field">
+              <legend class="visually-hidden">Symbolic regression settings</legend>
+
+              <label class="field">
+                State limit per layer
+                <span
+                  class="help-tip"
+                  tabindex="0"
+                  data-tooltip="Maximum number of states retained per token layer. Higher limits improve coverage but increase memory usage. Rough guide: 300,000 = light, 1,000,000 = standard, 2,000,000 = coverage-focused. Memory usage also increases with the number of input pairs."
+                >?</span>
+                <input
+                  id="stateLimitInput"
+                  type="number"
+                  min="1"
+                  step="1"
+                  value="1000000"
+                >
               </label>
             </fieldset>
           </div>
-
-          <label class="field">
-            Max results
-            <span
-		      class="help-tip"
-		      tabindex="0"
-		      data-tooltip="Maximum number of expressions to return from the smallest successful token layer. Results are displayed immediately. If fewer results are found, the scanner finishes that token layer and then stops."
-		    >?</span>
-            <input
-              id="maxFoundInput"
-              type="number"
-              min="1"
-              step="1"
-              value="3"
-            >
-          </label>
-
-          <label class="field">
-            Decimal fraction digits
-            <span
-		      class="help-tip"
-		      tabindex="0"
-		      data-tooltip="Controls the maximum fractional depth used for generated decimal literals such as .0001. Larger values generate more candidates and can increase scan time and memory usage."
-		    >?</span>
-            <input
-              id="maxDecimalFractionDigitsInput"
-              type="number"
-              min="1"
-              step="1"
-              value="17"
-            >
-          </label>
-
-          <label class="field">
-            Hex fraction digits
-            <span
-		      class="help-tip"
-		      tabindex="0"
-		      data-tooltip="Controls the maximum number of hexadecimal fractional digits generated for hex literals. Larger values generate more candidates and can increase scan time and memory usage."
-		    >?</span>
-            <input
-              id="maxHexFractionDigitsInput"
-              type="number"
-              min="1"
-              step="1"
-              value="17"
-            >
-          </label>
         </div>
       </details>
     </section>
@@ -193,6 +260,11 @@
 
     <section class="panel notes">
       <h2>Update History</h2>
+      <p>
+        September 16, 2026: Added bottom-up symbolic regression.<br>
+        Added separate controls for the expression-family scan and symbolic regression, including a configurable symbolic-regression state limit.<br>
+        Reorganized Advanced options into common and search-method-specific settings.
+      </p>
       <p>
         September 2, 2026: Updated numeric literal generation and Lua numeric semantics.<br>
         Added configurable maximum results and decimal/hex fraction digit limits.<br>
