@@ -109,11 +109,16 @@ function literalTokenSize(text) {
     return 1;
   }
 
+  // 数値literal先頭の符号はcostに影響しない。
   if (s.startsWith("+") || s.startsWith("-")) {
     s = s.slice(1);
   }
 
   const lower = s.toLowerCase();
+
+  // --------------------------------------------------------
+  // Hexadecimal
+  // --------------------------------------------------------
 
   if (lower.startsWith("0x")) {
     let body = s.slice(2);
@@ -145,39 +150,51 @@ function literalTokenSize(text) {
 
       if (exponent === null) {
         cost = leftCost + rightCost;
+
       } else if (exponent < 0) {
         cost =
           leftCost +
           rightCost +
           1 +
           intTokenSize(-exponent);
+
       } else {
         cost =
           leftCost +
           intTokenSize(rightValue << BigInt(exponent));
       }
+
     } else {
       const value = hexComponentValue(body);
       const baseCost = intTokenSize(value);
 
       if (exponent === null) {
         cost = baseCost;
+
       } else if (exponent < 0) {
         cost =
           baseCost +
           1 +
           intTokenSize(-exponent);
+
       } else {
         cost = intTokenSize(value << BigInt(exponent));
       }
     }
 
+    // 実測:
+    //   0x1p3  = 1
+    //   0x1p+3 = 3
     if (explicitPlus) {
       cost += 2;
     }
 
     return cost;
   }
+
+  // --------------------------------------------------------
+  // Decimal
+  // --------------------------------------------------------
 
   const ePos = lower.indexOf("e");
   let exponent = null;
@@ -199,9 +216,13 @@ function literalTokenSize(text) {
 
   if (s.includes(".")) {
     const [left, right] = s.split(".", 2);
+
+    // decimalでは左省略 ".1" は0 token。
+    // 一方 "1." の右省略は1 token。
     cost =
       decimalComponentCost(left, 0) +
       decimalComponentCost(right, 1);
+
   } else {
     cost = intTokenSize(BigInt(s));
   }
@@ -209,6 +230,9 @@ function literalTokenSize(text) {
   if (exponent !== null) {
     cost += intTokenSize(Math.abs(exponent));
 
+    // 実測:
+    //   1e3  = 2
+    //   1e+3 = 4
     if (explicitPlus) {
       cost += 2;
     }
@@ -221,25 +245,6 @@ function literalTokenSize(text) {
 // ------------------------------------------------------------
 // Semantic identity
 // ------------------------------------------------------------
-
-const FLOAT_KEY_BUFFER = new ArrayBuffer(8);
-const FLOAT_KEY_VIEW = new DataView(FLOAT_KEY_BUFFER);
-
-function valueKey(value) {
-  if (typeof value === "bigint") {
-    return `int:${value.toString()}`;
-  }
-
-  if (typeof value === "number") {
-    FLOAT_KEY_VIEW.setFloat64(0, value, false);
-    const hi = FLOAT_KEY_VIEW.getUint32(0, false).toString(16).padStart(8, "0");
-    const lo = FLOAT_KEY_VIEW.getUint32(4, false).toString(16).padStart(8, "0");
-    return `float:${hi}${lo}`;
-  }
-
-  throw new TypeError(`unsupported literal value: ${String(value)}`);
-}
-
 
 function betterText(newText, oldText) {
   return (
@@ -294,10 +299,12 @@ function decimalUnsignedMantissas(tokenSize) {
 
   const out = new Set();
 
+  // integer
   for (const n of componentValues(tokenSize)) {
     out.add(String(n));
   }
 
+  // .fraction
   for (const q of componentValues(tokenSize)) {
     if (q === 0) {
       if (tokenSize === 1) {
@@ -306,6 +313,7 @@ function decimalUnsignedMantissas(tokenSize) {
       continue;
     }
 
+    // 末尾0は、同じ値をより短い表記で書ける。
     if (q % 10 === 0) {
       continue;
     }
@@ -317,6 +325,7 @@ function decimalUnsignedMantissas(tokenSize) {
       const text = "." + "0".repeat(z) + digits;
       const value = Number(text);
 
+      // ここまで小さくなると、以後もbinary64では0。
       if (value === 0) {
         break;
       }
@@ -326,6 +335,7 @@ function decimalUnsignedMantissas(tokenSize) {
     }
   }
 
+  // integer.fraction
   for (let leftSize = 1; leftSize < tokenSize; leftSize++) {
     const rightSize = tokenSize - leftSize;
 
@@ -334,6 +344,7 @@ function decimalUnsignedMantissas(tokenSize) {
     }
 
     for (const p of componentValues(leftSize)) {
+      // 0.xxx は .xxx より必ず高いので不要。
       if (p === 0) {
         continue;
       }
@@ -351,6 +362,7 @@ function decimalUnsignedMantissas(tokenSize) {
           const text = `${p}.` + "0".repeat(z) + digits;
           const value = Number(text);
 
+          // fractional partがbinary64上で消えた。
           if (value === base) {
             break;
           }
@@ -363,7 +375,11 @@ function decimalUnsignedMantissas(tokenSize) {
   }
 
   const result = Array.from(out);
-  result.sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0));
+  result.sort((a, b) =>
+    a.length - b.length ||
+    (a < b ? -1 : a > b ? 1 : 0)
+  );
+
   Object.freeze(result);
   DECIMAL_UNSIGNED_MANTISSAS_CACHE.set(tokenSize, result);
   return result;
@@ -398,6 +414,7 @@ function generateDecimalExponent(out, tokenSize) {
           : [String(exponent), `-${exponent}`];
 
       for (const mantissa of mantissas) {
+        // 0eNは±0.0しか作らず、.0 / -.0に必ず負ける。
         if (Number(mantissa) === 0) {
           continue;
         }
@@ -429,6 +446,7 @@ function* iterHexFractionTexts(q) {
     return;
   }
 
+  // 末尾hex 0は短縮できる。
   if (q % 16 === 0) {
     return;
   }
@@ -444,6 +462,12 @@ function* iterHexFractionTexts(q) {
 
 
 function generateHexFixed(out, tokenSize) {
+  // --------------------------------------------------------
+  // 0x.fraction
+  //
+  // hexでは左省略にも1 tokenかかる。
+  // --------------------------------------------------------
+
   const rightSize = tokenSize - 1;
 
   if (is_2pow(rightSize)) {
@@ -474,6 +498,10 @@ function generateHexFixed(out, tokenSize) {
       }
     }
   }
+
+  // --------------------------------------------------------
+  // 0xINT.FRACTION
+  // --------------------------------------------------------
 
   for (let leftSize = 1; leftSize < tokenSize; leftSize++) {
     const rightSize2 = tokenSize - leftSize;
@@ -526,6 +554,15 @@ function generateHexFixed(out, tokenSize) {
 // ------------------------------------------------------------
 
 function generateHexPNoDot(out, tokenSize) {
+  // --------------------------------------------------------
+  // p >= 0
+  //
+  // token cost:
+  //   C(hex_component << p)
+  //
+  // p=0でもfloat subtypeになるので必須。
+  // --------------------------------------------------------
+
   const upper = size2int(tokenSize);
 
   for (let n = 0; n < upper; n++) {
@@ -555,6 +592,13 @@ function generateHexPNoDot(out, tokenSize) {
     }
   }
 
+  // --------------------------------------------------------
+  // p < 0
+  //
+  // token cost:
+  //   C(body) + 1 + C(|p|)
+  // --------------------------------------------------------
+
   for (let bodySize = 1; bodySize < tokenSize - 1; bodySize++) {
     const exponentSize = tokenSize - bodySize - 1;
 
@@ -570,6 +614,7 @@ function generateHexPNoDot(out, tokenSize) {
 
         const text =
           `0x${n.toString(16).toUpperCase()}p-${exponent}`;
+
         addSigned(out, text, tokenSize);
       }
     }
@@ -582,6 +627,17 @@ function generateHexPNoDot(out, tokenSize) {
 // ------------------------------------------------------------
 
 function generateHexPDotNonnegative(out, tokenSize) {
+  /*
+    実測結果:
+
+      0xLEFT.RIGHTpN, N >= 0
+
+    token cost:
+      C(LEFT) + C(int(RIGHT,16) << N)
+
+    LEFT省略時も1 token。
+  */
+
   for (let leftSize = 1; leftSize < tokenSize; leftSize++) {
     const shiftedRightSize = tokenSize - leftSize;
 
@@ -594,6 +650,10 @@ function generateHexPDotNonnegative(out, tokenSize) {
         leftValue === 0
           ? ""
           : leftValue.toString(16).toUpperCase();
+
+      // ------------------------------------------------
+      // RIGHT == 0
+      // ------------------------------------------------
 
       if (shiftedRightSize === 1 && leftValue !== 0) {
         let exponent = 1;
@@ -616,6 +676,10 @@ function generateHexPDotNonnegative(out, tokenSize) {
           exponent++;
         }
       }
+
+      // ------------------------------------------------
+      // RIGHT != 0
+      // ------------------------------------------------
 
       const rightUpper = size2int(shiftedRightSize);
 
@@ -676,6 +740,15 @@ function generateHexPDotNonnegative(out, tokenSize) {
 // ------------------------------------------------------------
 
 function generateHexPDotNegative(out, tokenSize) {
+  /*
+    実測結果:
+
+      0xLEFT.RIGHTp-N
+
+    token cost:
+      C(LEFT) + C(RIGHT) + 1 + C(N)
+  */
+
   for (let leftSize = 1; leftSize < tokenSize; leftSize++) {
     for (
       let rightSize = 1;
@@ -711,6 +784,7 @@ function generateHexPDotNegative(out, tokenSize) {
 
             const base =
               Number(leftValue) * (2 ** (-exponent));
+
             const fracTexts =
               q === 0
                 ? ["0"]
@@ -723,6 +797,7 @@ function generateHexPDotNegative(out, tokenSize) {
 
               const text =
                 `0x${left}.${frac}p-${exponent}`;
+
               let value;
 
               try {
@@ -814,6 +889,8 @@ function genSizeCached(tokenSize) {
 
   const cur = new Map(rawCandidates(tokenSize));
 
+  // 同じLua subtype + 値がより少ないtokenで既に作れるなら、
+  // 今回のshellから除外する。
   for (let smaller = 1; smaller < tokenSize; smaller++) {
     for (const [, value] of genSizeCached(smaller)) {
       cur.delete(valueKey(value));
@@ -821,6 +898,7 @@ function genSizeCached(tokenSize) {
   }
 
   const out = Array.from(cur.values());
+
   out.sort((a, b) =>
     a[0].length - b[0].length ||
     (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
@@ -859,17 +937,17 @@ function gen_int(tokenSize) {
 
   if (tokenSize === 1) {
     for (let x = 1 - upper; x < upper; x++) {
-      out.push(BigInt(x));
+      out.push([String(x), BigInt(x)]);
     }
   } else {
     const lower = size2int(tokenSize / 2);
 
     for (let x = 1 - upper; x < 1 - lower; x++) {
-      out.push(BigInt(x));
+      out.push([String(x), BigInt(x)]);
     }
 
     for (let x = lower; x < upper; x++) {
-      out.push(BigInt(x));
+      out.push([String(x), BigInt(x)]);
     }
   }
 
@@ -929,6 +1007,7 @@ function configureGenSize({
 
   globalThis.MAX_DECIMAL_FRACTION_DIGITS =
     MAX_DECIMAL_FRACTION_DIGITS;
+
   globalThis.MAX_HEX_FRACTION_DIGITS =
     MAX_HEX_FRACTION_DIGITS;
 }
